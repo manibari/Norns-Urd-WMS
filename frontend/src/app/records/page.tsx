@@ -88,7 +88,7 @@ export default function RecordsPage() {
                 <Descriptions.Item label="辨識信心">
                   {row.ocr_confidence != null ? `${(row.ocr_confidence * 100).toFixed(0)}%` : "—"}
                 </Descriptions.Item>
-                <Descriptions.Item label="FIFO 應領">{row.fifo_expected_date ?? "—"}</Descriptions.Item>
+                <Descriptions.Item label="FIFO 應領（製造日）">{row.fifo_expected_date ?? "—"}</Descriptions.Item>
                 <Descriptions.Item label="登記人">{row.captured_by}</Descriptions.Item>
                 {Object.entries(row.field_values).map(([k, v]) => (
                   <Descriptions.Item key={k} label={k}>{v || "—"}</Descriptions.Item>

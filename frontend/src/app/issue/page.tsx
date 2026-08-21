@@ -332,6 +332,12 @@ function IssueScreen() {
                       <span style={{ fontSize: 18, fontWeight: 600 }}>
                         製造 {lot.manufacture_date ?? "未填"}
                       </span>
+                      {lot.is_fifo_next && <Tag color="green">FIFO 應領</Tag>}
+                      {lot.fifo_also_ok && (
+                        <Tooltip title="跟應領那批同一個製造日，領這批也合法，不會被擋">
+                          <Tag>同製造日．可領</Tag>
+                        </Tooltip>
+                      )}
                       <Text type="secondary">進貨 {lot.receipt_date}</Text>
                       {lot.effective_expiry && (
                         <Text type={lot.days_left != null && lot.days_left <= 90 ? "danger" : "secondary"}>
@@ -340,12 +346,6 @@ function IssueScreen() {
                         </Text>
                       )}
                       <Text type="secondary">在庫 {lot.qty_on_hand} 箱</Text>
-                      {lot.is_fifo_next && <Tag color="green">FIFO 應領</Tag>}
-                      {lot.fifo_also_ok && (
-                        <Tooltip title="跟應領那批同一個製造日，領這批也合法，不會被擋">
-                          <Tag>同製造日．可領</Tag>
-                        </Tooltip>
-                      )}
                     </Space>
                   </Radio>
                 ))}

@@ -171,10 +171,12 @@ export default function StockPage() {
                   })}
                   columns={[
                     {
-                      title: "進貨日", dataIndex: "receipt_date",
-                      render: (v: string, row: Lot) => (
+                      // FIFO sorts on 製造日, so the badge sits on 製造日 —
+                      // hanging it off 進貨日 points the operator at the wrong number.
+                      title: "製造日", dataIndex: "manufacture_date", width: 210,
+                      render: (v: string | null, row: Lot) => (
                         <Space size={4} wrap>
-                          {v}
+                          {v ?? <Text type="secondary">未填</Text>}
                           {row.is_fifo_next && <Tag color="green">FIFO 應領</Tag>}
                           {row.fifo_also_ok && (
                             <Tooltip title="跟應領那批同一個製造日，領這批也合法">
@@ -184,7 +186,7 @@ export default function StockPage() {
                         </Space>
                       ),
                     },
-                    { title: "製造日", dataIndex: "manufacture_date", render: (v) => v ?? "—" },
+                    { title: "進貨日", dataIndex: "receipt_date" },
                     {
                       title: "有效期限", dataIndex: "effective_expiry",
                       render: (_, row: Lot) => (
