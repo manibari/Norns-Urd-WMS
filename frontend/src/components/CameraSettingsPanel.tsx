@@ -18,6 +18,12 @@ import { api, type CameraSettings } from "@/lib/api";
 
 const { Text } = Typography;
 
+function describeAge(seconds: number): string {
+  if (seconds < 90) return `${Math.round(seconds)} 秒前`;
+  if (seconds < 5400) return `${Math.round(seconds / 60)} 分鐘前`;
+  return `${Math.round(seconds / 3600)} 小時前`;
+}
+
 export default function CameraSettingsPanel() {
   const [settings, setSettings] = useState<CameraSettings | null>(null);
   const [busy, setBusy] = useState(false);
@@ -60,8 +66,13 @@ export default function CameraSettingsPanel() {
     setResult(null);
     try {
       const res = await api.testCamera();
+      // 資料夾來源說「連線成功」沒有意義 —— 要說的是讀到哪個檔、那張多舊。
+      // 相機兩小時前就不拍了，資料夾照樣「讀得到」。
+      const source = res.source_name
+        ? `讀到 ${res.source_name}（${describeAge(res.source_age_seconds ?? 0)}），`
+        : "";
       setResult(res.ok
-        ? { ok: true, text: `連線成功：取得 ${Math.round((res.bytes ?? 0) / 1024)}KB 影像，耗時 ${res.elapsed_ms}ms` }
+        ? { ok: true, text: `${source}${Math.round((res.bytes ?? 0) / 1024)}KB，耗時 ${res.elapsed_ms}ms` }
         : { ok: false, text: res.error ?? "連線失敗" });
     } catch (e) {
       setResult({ ok: false, text: (e as Error).message });
@@ -87,32 +98,51 @@ export default function CameraSettingsPanel() {
         </Form.Item>
 
         <Row gutter={16}>
-          <Col xs={24} md={8}>
+          <Col xs={24} md={transport === "folder" ? 8 : 8}>
             <Form.Item
               name="transport" label="連線方式"
-              extra={transport === "http" ? "抓一個 snapshot 網址（多數 IP 相機）" : "直接開 TCP socket 讀影像"}
+              extra={
+                transport === "http" ? "抓一個 snapshot 網址（多數 IP 相機）"
+                  : transport === "raw" ? "直接開 TCP socket 讀影像"
+                    : "取資料夾裡最新的一張圖"
+              }
             >
               <Select
                 options={[
                   { value: "http", label: "HTTP snapshot" },
                   { value: "raw", label: "原始 TCP" },
+                  { value: "folder", label: "存檔資料夾" },
                 ]}
               />
             </Form.Item>
           </Col>
-          <Col xs={24} md={10}>
-            <Form.Item
-              name="host" label="IP 位址"
-              rules={[{ required: enabled, message: "啟用時必須填位址" }]}
-            >
-              <Input placeholder="例 192.168.1.50" />
-            </Form.Item>
-          </Col>
-          <Col xs={24} md={6}>
-            <Form.Item name="port" label="連接埠">
-              <InputNumber min={1} max={65535} style={{ width: "100%" }} />
-            </Form.Item>
-          </Col>
+          {transport === "folder" ? (
+            <Col xs={24} md={16}>
+              <Form.Item
+                name="folder" label="影像資料夾"
+                rules={[{ required: enabled, message: "啟用時必須填資料夾路徑" }]}
+                extra="相機軟體存圖的地方。Windows 磁碟在這裡是 /mnt/c/…"
+              >
+                <Input placeholder="例 /mnt/c/Users/HP/SCMVS/0821/MV-SC3016C-06M-WBN (DA9442483)" />
+              </Form.Item>
+            </Col>
+          ) : (
+            <>
+              <Col xs={24} md={10}>
+                <Form.Item
+                  name="host" label="IP 位址"
+                  rules={[{ required: enabled, message: "啟用時必須填位址" }]}
+                >
+                  <Input placeholder="例 192.168.1.50" />
+                </Form.Item>
+              </Col>
+              <Col xs={24} md={6}>
+                <Form.Item name="port" label="連接埠">
+                  <InputNumber min={1} max={65535} style={{ width: "100%" }} />
+                </Form.Item>
+              </Col>
+            </>
+          )}
         </Row>
 
         {transport === "http" ? (
@@ -159,7 +189,13 @@ export default function CameraSettingsPanel() {
 
         <Space>
           <Button type="primary" onClick={save} loading={busy}>儲存</Button>
-          <Button onClick={test} loading={busy} disabled={!settings.host}>測試連線</Button>
+          <Button
+            onClick={test}
+            loading={busy}
+            disabled={settings.transport === "folder" ? !settings.folder : !settings.host}
+          >
+            測試連線
+          </Button>
           {settings.endpoint && <Text type="secondary">目前：{settings.endpoint}</Text>}
         </Space>
       </Form>

@@ -85,13 +85,15 @@ export type Item = {
 
 export type CameraSettings = {
   enabled: boolean;
-  /** http = 抓 snapshot 網址；raw = 直接開 TCP socket */
-  transport: "http" | "raw";
+  /** http = 抓 snapshot 網址；raw = 直接開 TCP socket；folder = 取資料夾裡最新的一張 */
+  transport: "http" | "raw" | "folder";
   host: string;
   port: number;
   path: string;
   username: string;
   trigger: string;
+  /** folder 專用：相機軟體存檔的資料夾 */
+  folder: string;
   timeout: number;
   has_password: boolean;
   endpoint: string | null;
@@ -136,6 +138,10 @@ export type Proposal = {
     error: string | null;
   };
   candidates: { lot_id: number; receipt_date: string; manufacture_date: string | null; qty_on_hand: number }[];
+  /** 從資料夾來源擷取時才有：讀到哪個檔、幾秒前存的、相機存檔的時間 */
+  source_name?: string;
+  source_age_seconds?: number;
+  source_time?: string;
   /** 標籤讀到的料號跟所選型號對不對得上。null = 讀不到料號，無從判斷 */
   expected_supplier_code: string | null;
   decision: "lock" | "defer";
@@ -232,6 +238,18 @@ export const token = {
 /** Thrown on 401 so the shell can send the user back to the PIN pad. */
 export class Unauthenticated extends Error {}
 
+/**
+ * 資料夾裡最新的照片太舊了 —— 不是錯誤，是還沒拍。
+ *
+ * 跟 Error 分開，因為畫面該做的事完全不同：這個要留白繼續等，
+ * 一般錯誤要把訊息秀出來讓人去查。
+ */
+export class StaleImage extends Error {
+  constructor(message: string, readonly ageSeconds: number, readonly sourceTime: string | null) {
+    super(message);
+  }
+}
+
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
   const auth = token.get();
   const res = await fetch(path, {
@@ -248,7 +266,15 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
       token.clear();
       throw new Unauthenticated(body.detail ?? "請先登入");
     }
-    throw new Error(body.detail ?? "請求失敗");
+    if (res.status === 409 && body.detail?.code === "stale") {
+      throw new StaleImage(
+        body.detail.message ?? "還沒有新的照片",
+        body.detail.age_seconds ?? 0,
+        body.detail.source_time ?? null,
+      );
+    }
+    // detail 可能是 dict（結構化錯誤），直接塞給 Error 會變成 [object Object]
+    throw new Error(typeof body.detail === "string" ? body.detail : "請求失敗");
   }
   return res.json();
 }
@@ -327,10 +353,19 @@ export const api = {
       body: JSON.stringify(body),
     }),
   testCamera: () =>
-    req<{ ok: boolean; endpoint: string; error?: string; bytes?: number; elapsed_ms?: number }>(
-      "/api/camera/test", { method: "POST" }),
+    req<{
+      ok: boolean; endpoint: string; error?: string; bytes?: number; elapsed_ms?: number;
+      /** folder 來源才有：讀到哪個檔、幾秒前存的 */
+      source_name?: string; source_age_seconds?: number;
+    }>("/api/camera/test", { method: "POST" }),
   /** 從網路相機擷取一張並辨識，跟上傳走同一條路 */
   captureFromCamera: () => req<Proposal>("/api/camera/capture", { method: "POST" }),
+  /** 只看資料夾裡最新那張是什麼、多舊 —— 給等待畫面輪詢用，不做辨識 */
+  latestImage: () =>
+    req<{
+      ok: boolean; watching: boolean; error?: string;
+      source_name?: string; source_age_seconds?: number; source_time?: string; fresh?: boolean;
+    }>("/api/camera/latest"),
   /** 辨識不出品項時，人工指定後重新比對批次（不重跑辨識、不重複計費） */
   resolveItem: (itemId: number, ocrReceiptDate: string | null) =>
     req<Partial<Proposal>>("/api/resolve-item", json({ item_id: itemId, ocr_receipt_date: ocrReceiptDate })),

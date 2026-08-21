@@ -23,7 +23,12 @@ from pydantic import BaseModel
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "core"))
 
-from urdwms_core.camera import CameraConfig, CameraError, capture as camera_capture  # noqa: E402
+from urdwms_core.camera import (  # noqa: E402
+    CameraConfig, CameraError, StaleImage,
+    STALE_AFTER as CAMERA_STALE_AFTER,
+    capture as camera_capture,
+    newest_image as camera_newest_image,
+)
 from urdwms_core.matching import (  # noqa: E402
     Candidate, fifo_basis, fifo_expected, fifo_target, match_candidates, match_item_code,
 )
@@ -552,6 +557,7 @@ class CameraIn(BaseModel):
     username: str = ""
     password: str = ""
     trigger: str = ""
+    folder: str = ""
     timeout: float = 8.0
 
 
@@ -572,18 +578,26 @@ def get_camera(user: dict = Depends(current_user)) -> dict:
         # the page.
         **{k: v for k, v in config.__dict__.items() if k != "password"},
         "has_password": bool(config.password),
-        "endpoint": config.endpoint if config.host else None,
+        "endpoint": config.endpoint if config.configured else None,
     }
 
 
 @app.put("/api/camera")
 def set_camera(payload: CameraIn, user: dict = Depends(requires("dictionary.manage"))) -> dict:
-    if payload.transport not in ("http", "raw"):
-        raise HTTPException(400, "連線方式只能是 http 或 raw")
-    if payload.enabled and not payload.host.strip():
-        raise HTTPException(400, "啟用網路相機必須填位址")
-    if not 1 <= payload.port <= 65535:
-        raise HTTPException(400, "連接埠必須在 1–65535")
+    if payload.transport not in ("http", "raw", "folder"):
+        raise HTTPException(400, "連線方式只能是 http、raw 或 folder")
+    if payload.transport == "folder":
+        if payload.enabled and not payload.folder.strip():
+            raise HTTPException(400, "啟用資料夾來源必須填資料夾路徑")
+        if payload.folder.strip() and not Path(payload.folder).is_dir():
+            # Checked on save rather than only at capture time: a path typo
+            # found at 7am in front of the line is a much worse place to find it.
+            raise HTTPException(400, f"找不到這個資料夾：{payload.folder}")
+    else:
+        if payload.enabled and not payload.host.strip():
+            raise HTTPException(400, "啟用網路相機必須填位址")
+        if not 1 <= payload.port <= 65535:
+            raise HTTPException(400, "連接埠必須在 1–65535")
 
     existing = _camera_config()
     data = payload.model_dump()
@@ -611,13 +625,53 @@ async def test_camera(user: dict = Depends(requires("dictionary.manage"))) -> di
     started = time.monotonic()
     try:
         data = await run_in_threadpool(camera_capture, config)
+    except StaleImage as exc:
+        # The folder is readable and the path is right — the camera just is not
+        # taking pictures. Saying that plainly is the whole point of this button;
+        # "連線成功" here would send someone to check the network for nothing.
+        return {
+            "ok": False, "endpoint": config.endpoint, "error": str(exc),
+            "source_age_seconds": round(exc.age_seconds), "source_time": exc.source_time,
+        }
     except CameraError as exc:
         return {"ok": False, "endpoint": config.endpoint, "error": str(exc)}
-    return {
+    result = {
         "ok": True,
         "endpoint": config.endpoint,
         "bytes": len(data),
         "elapsed_ms": round((time.monotonic() - started) * 1000),
+    }
+    if config.transport == "folder":
+        # Which file, and how old — "connection OK" says nothing useful about a
+        # folder that the camera stopped writing to two hours ago.
+        newest, age = await run_in_threadpool(camera_newest_image, config)
+        result |= {"source_name": newest.name, "source_age_seconds": round(age)}
+    return result
+
+
+@app.get("/api/camera/latest")
+async def latest_camera_image(user: dict = Depends(requires("issue.create"))) -> dict:
+    """What the newest still is, without reading or recognising it.
+
+    This is what the issuing screen polls while it waits for someone to trigger
+    the camera. It deliberately does no work beyond a stat() — recognition costs
+    seconds and money, and polling it once a second would spend both on frames
+    nobody asked about.
+    """
+    config = _camera_config()
+    if not config.enabled or config.transport != "folder":
+        return {"ok": False, "watching": False}
+    try:
+        newest, age = await run_in_threadpool(camera_newest_image, config)
+    except CameraError as exc:
+        return {"ok": False, "watching": True, "error": str(exc)}
+    return {
+        "ok": True,
+        "watching": True,
+        "source_name": newest.name,
+        "source_age_seconds": round(age),
+        "source_time": datetime.fromtimestamp(newest.stat().st_mtime).isoformat(timespec="seconds"),
+        "fresh": age <= CAMERA_STALE_AFTER,
     }
 
 
@@ -631,16 +685,40 @@ async def capture_from_camera(user: dict = Depends(requires("issue.create"))) ->
     """
     config = _camera_config()
     if not config.enabled:
-        raise HTTPException(400, "網路相機未啟用，請在基本資料設定")
+        raise HTTPException(400, "影像來源未啟用，請在系統設定開啟")
     try:
         data = await run_in_threadpool(camera_capture, config)
+    except StaleImage as exc:
+        # 409 rather than 502: nothing is broken, there just is not a current
+        # photo yet. The screen stays blank and keeps waiting.
+        raise HTTPException(409, {
+            "code": "stale",
+            "message": str(exc),
+            "age_seconds": round(exc.age_seconds),
+            "source_time": exc.source_time,
+        }) from exc
     except CameraError as exc:
         raise HTTPException(502, str(exc)) from exc
+
+    source: dict = {}
+    if config.transport == "folder":
+        newest, age = await run_in_threadpool(camera_newest_image, config)
+        source = {
+            "source_name": newest.name,
+            "source_age_seconds": round(age),
+            # The camera's own save time, not when we read it — that is the
+            # moment the box was in front of the lens, which is what the
+            # operator is checking against.
+            "source_time": datetime.fromtimestamp(newest.stat().st_mtime).isoformat(timespec="seconds"),
+        }
 
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
     path = UPLOADS / f"{stamp}-cam.jpg"
     path.write_bytes(data)
-    return await _recognise_path(path, data, None)
+    # A copy is kept even though the original still sits in the camera's folder:
+    # that folder is the vendor software's to rotate or clear, and a traceability
+    # record whose photo lives somewhere we do not control is not a record.
+    return (await _recognise_path(path, data, None)) | source
 
 
 # --------------------------------------------------------------------------- dictionary
