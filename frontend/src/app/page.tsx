@@ -85,7 +85,7 @@ export default function StockPage() {
       </Card>
 
       <Card
-        title="各品項庫存"
+        title="各品項庫存（最近進貨的在最上面）"
         style={{ marginTop: 24 }}
         extra={
           <Space>
@@ -103,7 +103,7 @@ export default function StockPage() {
           dataSource={items}
           pagination={false}
           size="middle"
-          scroll={{ x: 1000 }}
+          scroll={{ x: 1120 }}
           locale={{ emptyText: <Empty description="尚無品項" image={Empty.PRESENTED_IMAGE_SIMPLE} /> }}
           expandable={{
             expandedRowRender: (item) => {
@@ -115,6 +115,9 @@ export default function StockPage() {
                   pagination={false}
                   dataSource={rows}
                   locale={{ emptyText: "尚無批次" }}
+                  onRow={(row: Lot) => ({
+                    style: row.qty_on_hand === 0 ? { opacity: 0.45, background: "#fafafa" } : undefined,
+                  })}
                   columns={[
                     {
                       title: "進貨日", dataIndex: "receipt_date",
@@ -136,6 +139,14 @@ export default function StockPage() {
                         v === "不合格" ? <Tag color="red">不合格</Tag>
                           : v === "合格" ? <Tag color="green">合格</Tag>
                           : <Text type="secondary">—</Text>,
+                    },
+                    {
+                      title: "狀態", dataIndex: "lot_state",
+                      render: (v: string, row: Lot) =>
+                        v === "已領完" ? <Tag>已領完</Tag>
+                          : v === "領貨中"
+                            ? <Tag color="blue">領貨中 {row.qty_drawn}/{row.qty_received}</Tag>
+                            : <Tag color="default">未動用</Tag>,
                     },
                     {
                       title: "在庫", dataIndex: "qty_on_hand", align: "right" as const,
@@ -191,6 +202,10 @@ export default function StockPage() {
                   </Space>
                 );
               },
+            },
+            {
+              title: "最近進貨", dataIndex: "last_receipt_date", width: 120,
+              render: (v: string | null) => v ?? <Text type="secondary">—</Text>,
             },
             {
               title: "狀態", width: 150,

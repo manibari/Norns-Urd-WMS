@@ -1,14 +1,19 @@
 "use client";
 
 /**
- * Issuing screen — the one operators use on the packing line.
+ * Issuing screen.
  *
- * The photo decides everything it can: which 型號 the box is, and which lot.
- * The operator is asked only for what a camera cannot know (上/下膜, machine,
- * product, meter reading) — and for the 型號 only when recognition could not
- * settle it. Making someone pick a 型號 they are holding in their hands is the
- * kind of step that gets skipped, and a skipped step is how the paper form
- * comes back.
+ * A draw is three facts: what was taken, and which lot — which is to say its
+ * 進貨日 and 製造日. So that is the whole required path: pick the item, pick the
+ * lot, submit. Machine, product and meter reading are columns off the paper
+ * form; they matter for traceability but none of them should stand between an
+ * operator and recording that a box left the shelf, so they are optional and
+ * folded away.
+ *
+ * Recognition is an optional shortcut on top, not the way in —
+ * requirement section 2.3 already said the manual path is the permanent one
+ * ("辨識可斷，系統不可斷"), and until the recognition PoC has real numbers
+ * behind it, making it the entrance would be betting the whole flow on it.
  *
  * Deviates from ChimesFlow density on purpose (declared mode-b override):
  * 64px touch targets and oversized type, because this is used with gloves on,
@@ -22,88 +27,135 @@
 
 import { CameraOutlined, InboxOutlined, ReloadOutlined } from "@ant-design/icons";
 import {
-  Alert, Button, Card, Col, Empty, Form, Input, Radio,
+  Alert, Button, Card, Col, Collapse, Empty, Form, Input, InputNumber, Radio,
   Row, Select, Space, Spin, Tag, Typography, message,
 } from "antd";
 import Link from "next/link";
-import { useEffect, useMemo, useRef, useState } from "react";
-import { api, type Dictionary, type Proposal } from "@/lib/api";
+import { useSearchParams } from "next/navigation";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { api, type Dictionary, type Item, type Lot, type Proposal } from "@/lib/api";
 
 const { Title, Text } = Typography;
 
 const TOUCH = 64;
 
-const ITEM_DEFER_COPY: Record<string, string> = {
-  no_code_read: "標籤上的型號讀不出來",
-  no_item_match: "讀到的型號不在品項主檔裡，或這個品項本來就沒有型號",
-  ambiguous_item: "標籤同時對到多個型號，無法確定是哪一個",
-};
-
 type Verdict = { status: string; id: number; expected?: string } | null;
 
 export default function IssuePage() {
-  const [busy, setBusy] = useState(false);
-  // Machines and products are this factory's configuration (基本資料), not the
-  // product's — the paper form lists them in its own notes.
+  return (
+    <Suspense fallback={<Card title="領用登錄" loading />}>
+      <IssueScreen />
+    </Suspense>
+  );
+}
+
+function IssueScreen() {
+  const params = useSearchParams();
+  const [items, setItems] = useState<Item[]>([]);
   const [dict, setDict] = useState<Dictionary | null>(null);
-  useEffect(() => { api.dictionary().then(setDict).catch(() => undefined); }, []);
-  const machines = (dict?.entries.machine ?? []).map((e) => e.value);
-  const products = (dict?.entries.packed_product ?? []).map((e) => e.value);
-  const [proposal, setProposal] = useState<Proposal | null>(null);
-  const [chosenLot, setChosenLot] = useState<number>();
+  const [itemId, setItemId] = useState<number>();
+  const [lots, setLots] = useState<Lot[]>([]);
+  const [lotId, setLotId] = useState<number>();
+  // One box is the usual draw, so it is the default — but occasionally it is
+  // more, and pretending otherwise would push people to record two draws or
+  // just not record the second box.
+  const [qty, setQty] = useState(1);
+  const [busy, setBusy] = useState(false);
+  const [scanning, setScanning] = useState(false);
+  const [capture, setCapture] = useState<Proposal | null>(null);
   const [verdict, setVerdict] = useState<Verdict>(null);
   const [form] = Form.useForm();
   const fileRef = useRef<HTMLInputElement>(null);
 
-  const fifoTarget = useMemo(() => {
-    if (!proposal?.candidates.length) return null;
-    return proposal.candidates.reduce((a, b) => (a.receipt_date <= b.receipt_date ? a : b));
-  }, [proposal]);
+  const machines = (dict?.entries.machine ?? []).map((e) => e.value);
+  const products = (dict?.entries.packed_product ?? []).map((e) => e.value);
+
+  useEffect(() => {
+    Promise.allSettled([api.items(), api.dictionary()]).then(([i, d]) => {
+      if (i.status === "fulfilled") {
+        setItems(i.value);
+        const requested = params.get("item");
+        const usable = (requested && i.value.find((r) => String(r.id) === requested))
+          ?? i.value.find((r) => r.on_hand > 0);
+        if (usable) setItemId(usable.id);
+      } else {
+        message.error(`品項載入失敗：${i.reason?.message}`);
+      }
+      if (d.status === "fulfilled") setDict(d.value);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const loadLots = useCallback(async (id: number) => {
+    try {
+      const rows = await api.lots(id);
+      const drawable = rows.filter((l) => l.qty_on_hand > 0 && l.verdict !== "不合格");
+      setLots(drawable);
+      // Default to what FIFO wants. Pre-selecting the right answer means the
+      // common case is one tap, and choosing otherwise is a deliberate act.
+      const fifo = drawable.find((l) => l.is_fifo_next);
+      setLotId(fifo?.id ?? drawable[0]?.id);
+    } catch (e) {
+      message.error((e as Error).message);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (itemId) loadLots(itemId);
+    else { setLots([]); setLotId(undefined); }
+  }, [itemId, loadLots]);
+
+  const selected = items.find((i) => i.id === itemId);
+  const fifoLot = useMemo(
+    () => (lots.length ? lots.reduce((a, b) => (a.receipt_date <= b.receipt_date ? a : b)) : null),
+    [lots],
+  );
+  const takingWrongLot = Boolean(lotId && fifoLot && lotId !== fifoLot.id);
+  const chosenLot = lots.find((l) => l.id === lotId);
+  useEffect(() => { setQty(1); }, [lotId]);
 
   async function onCapture(file: File) {
-    setBusy(true);
-    setVerdict(null);
+    setScanning(true);
     try {
       const result = await api.recognize(file);
-      setProposal(result);
-      setChosenLot(result.locked_lot?.lot_id);
+      setCapture(result);
+      if (result.item_id) {
+        setItemId(result.item_id);
+        const rows = await api.lots(result.item_id);
+        const drawable = rows.filter((l) => l.qty_on_hand > 0 && l.verdict !== "不合格");
+        setLots(drawable);
+        setLotId(result.locked_lot?.lot_id ?? drawable.find((l) => l.is_fifo_next)?.id);
+        message.success(
+          result.locked_lot
+            ? `辨識到 ${result.item_label}，進貨日 ${result.locked_lot.receipt_date}`
+            : `辨識到 ${result.item_label}，但讀不出進貨日，請自己挑批次`,
+        );
+      } else {
+        message.warning("辨識不出是哪個品項，請自己選");
+      }
     } catch (e) {
       message.error((e as Error).message);
     } finally {
-      setBusy(false);
+      setScanning(false);
       if (fileRef.current) fileRef.current.value = "";
     }
   }
 
-  async function pickItem(itemId: number) {
-    if (!proposal) return;
-    setBusy(true);
-    try {
-      const patch = await api.resolveItem(itemId, proposal.recognition.receipt_date);
-      const next = { ...proposal, ...patch } as Proposal;
-      setProposal(next);
-      setChosenLot(next.locked_lot?.lot_id);
-    } catch (e) {
-      message.error((e as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  }
-
   async function submit() {
-    if (!proposal?.item_id) return;
+    if (!itemId || !lotId) return;
     const fields = await form.validateFields().catch(() => null);
     if (!fields) return;
     setBusy(true);
     try {
       const res = await api.createScan({
-        item_id: proposal.item_id,
-        lot_id: chosenLot ?? null,
-        image_path: proposal.image_path,
-        ocr_receipt_date: proposal.recognition.receipt_date,
-        ocr_confidence: proposal.recognition.confidence,
-        ocr_notes: proposal.recognition.notes,
-        match_distance: proposal.match_distance,
+        item_id: itemId,
+        lot_id: lotId,
+        qty,
+        image_path: capture?.image_path ?? null,
+        ocr_receipt_date: capture?.recognition.receipt_date ?? null,
+        ocr_confidence: capture?.recognition.confidence ?? null,
+        ocr_notes: capture?.recognition.notes ?? null,
+        match_distance: capture?.match_distance ?? null,
         fields,
         detail_pending: !fields["產品名稱"],
       });
@@ -116,234 +168,228 @@ export default function IssuePage() {
   }
 
   function reset() {
-    setProposal(null);
-    setChosenLot(undefined);
+    setCapture(null);
     setVerdict(null);
+    setQty(1);
     form.resetFields();
+    if (itemId) loadLots(itemId);
   }
 
   if (verdict) return <VerdictBlock verdict={verdict} onNext={reset} />;
-
-  const itemDeferred = proposal && !proposal.item_id;
 
   return (
     <>
       <Title level={3} style={{ marginTop: 0 }}>領用登錄</Title>
 
-      <Card title="1. 拍箱子">
-        <input
-          ref={fileRef}
-          type="file"
-          accept="image/*"
-          capture="environment"
-          style={{ display: "none" }}
-          onChange={(e) => e.target.files?.[0] && onCapture(e.target.files[0])}
-        />
-        <Button
-          type="primary"
+      <Card
+        title="1. 選品項"
+        extra={
+          <>
+            <input
+              ref={fileRef}
+              type="file"
+              accept="image/*"
+              capture="environment"
+              style={{ display: "none" }}
+              onChange={(e) => e.target.files?.[0] && onCapture(e.target.files[0])}
+            />
+            <Button
+              icon={<CameraOutlined />}
+              loading={scanning}
+              onClick={() => fileRef.current?.click()}
+            >
+              拍照帶入
+            </Button>
+          </>
+        }
+      >
+        <Select
           size="large"
-          icon={<CameraOutlined />}
-          loading={busy && !proposal}
-          onClick={() => fileRef.current?.click()}
-          style={{ height: TOUCH, fontSize: 20, width: "100%" }}
-        >
-          {proposal ? "重拍" : "拍照或選擇照片"}
-        </Button>
+          style={{ width: "100%", height: TOUCH }}
+          value={itemId}
+          onChange={(v) => { setItemId(v); setCapture(null); }}
+          showSearch
+          optionFilterProp="label"
+          placeholder="選要領用的品項"
+          options={items.map((i) => ({
+            value: i.id,
+            label: `${i.label}｜${i.name}${i.spec ? ` ${i.spec}` : ""}（在庫 ${i.on_hand} 箱）`,
+            disabled: i.on_hand === 0,
+          }))}
+        />
         <Text type="secondary" style={{ display: "block", marginTop: 12 }}>
-          對準側面的標籤和紅色驗收章。型號和批次都由照片判斷，不用先選。
+          在庫 0 的品項不能選。「拍照帶入」是輔助 —— 認得出就自動選好品項與批次，認不出照樣手動選。
         </Text>
+        {capture && (
+          <Alert
+            style={{ marginTop: 16 }}
+            type={capture.item_id ? "info" : "warning"}
+            title={capture.item_id ? "已由照片帶入" : "照片認不出品項"}
+            description={
+              <Space orientation="vertical" size={2}>
+                <span>
+                  標籤讀到型號：{capture.recognition.model_code
+                    ?? capture.recognition.item_code ?? "讀不出"}
+                  ｜章：{capture.recognition.receipt_date ?? "讀不出"}
+                </span>
+                {capture.recognition.notes && (
+                  <Text type="secondary">{capture.recognition.notes}</Text>
+                )}
+              </Space>
+            }
+            action={<Button size="small" icon={<ReloadOutlined />} onClick={reset}>清除</Button>}
+          />
+        )}
       </Card>
 
-      {busy && !proposal && (
-        <Card style={{ marginTop: 24, textAlign: "center" }} title="辨識中">
-          <Spin size="large" />
-          <Text type="secondary" style={{ display: "block", marginTop: 12 }}>
-            正在讀取標籤料號與驗收章日期
-          </Text>
+      {itemId && lots.length === 0 && (
+        <Card title="還不能領用" style={{ marginTop: 24 }}>
+          <Empty
+            image={Empty.PRESENTED_IMAGE_SIMPLE}
+            description={`${selected?.label ?? "此品項"} 沒有可領用的在庫批次`}
+          >
+            <Link href="/receiving">
+              <Button type="primary" icon={<InboxOutlined />}>去收貨建批</Button>
+            </Link>
+          </Empty>
         </Card>
       )}
 
-      {proposal && (
+      {lots.length > 0 && (
         <>
-          <Card
-            title="2. 確認"
-            style={{ marginTop: 24 }}
-            extra={<Button icon={<ReloadOutlined />} onClick={reset}>重來</Button>}
-          >
-            <Row gutter={24}>
-              <Col xs={24} md={10}>
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img
-                  src={proposal.image_path}
-                  alt="領用箱影像"
-                  style={{ width: "100%", borderRadius: 6, border: "1px solid #f0f0f0" }}
-                />
-                <Text type="secondary" style={{ display: "block", marginTop: 8, fontSize: 12 }}>
-                  標籤讀到：{proposal.recognition.item_code ?? "讀不出料號"}
-                  {proposal.recognition.receipt_date && `｜章：${proposal.recognition.receipt_date}`}
-                </Text>
-              </Col>
+          <Card title="2. 選批次（進貨日／製造日）" style={{ marginTop: 24 }}>
+            <Radio.Group
+              value={lotId}
+              onChange={(e) => setLotId(e.target.value)}
+              style={{ display: "block" }}
+            >
+              <Space orientation="vertical" style={{ width: "100%" }} size={12}>
+                {lots.map((lot) => (
+                  <Radio
+                    key={lot.id}
+                    value={lot.id}
+                    style={{
+                      width: "100%", minHeight: TOUCH, padding: "12px 16px",
+                      border: `1px solid ${lot.id === lotId ? "#1677ff" : "#d9d9d9"}`,
+                      borderRadius: 6, fontSize: 18,
+                      background: lot.id === lotId ? "#e6f4ff" : "#fff",
+                    }}
+                  >
+                    <Space wrap>
+                      <span style={{ fontSize: 18 }}>進貨 {lot.receipt_date}</span>
+                      <span style={{ fontSize: 18 }}>製造 {lot.manufacture_date ?? "—"}</span>
+                      {lot.expiry_date && <Text type="secondary">有效 {lot.expiry_date}</Text>}
+                      <Text type="secondary">在庫 {lot.qty_on_hand} 箱</Text>
+                      {lot.is_fifo_next && <Tag color="green">FIFO 應領</Tag>}
+                    </Space>
+                  </Radio>
+                ))}
+              </Space>
+            </Radio.Group>
 
-              <Col xs={24} md={14}>
-                {itemDeferred ? (
-                  <>
-                    <Alert
-                      type="warning"
-                      title="辨識不出是哪個品項，請自己選"
-                      description={
-                        (ITEM_DEFER_COPY[proposal.item_match.reason ?? ""] ?? "無法判定品項") +
-                        (proposal.item_match.contenders.length
-                          ? `（可能是：${proposal.item_match.contenders.join("、")}）`
-                          : "")
-                      }
-                      style={{ marginBottom: 16 }}
-                    />
-                    <Select
-                      size="large"
-                      style={{ width: "100%", height: TOUCH }}
-                      placeholder="選品項"
-                      loading={busy}
-                      optionFilterProp="label"
-                      showSearch
-                      onChange={pickItem}
-                      options={proposal.catalogue.map((c) => ({
-                        value: c.id,
-                        label: `${c.label}｜${c.name}${c.spec ? ` ${c.spec}` : ""}（在庫 ${c.on_hand}）`,
-                        disabled: c.on_hand === 0,
-                      }))}
-                    />
-                    <Text type="secondary" style={{ display: "block", marginTop: 8 }}>
-                      在庫 0 的品項不能選 —— 沒有批次可以領。沒有型號的品項（例：脫氧劑）
-                      本來就只能這樣選，不是辨識失敗。
-                    </Text>
-                  </>
-                ) : (
-                  <>
-                    <div style={{ marginBottom: 16 }}>
-                      <Text type="secondary">品項</Text>
-                      <div>
-                        <Text strong style={{ fontSize: 28 }}>{proposal.item_label}</Text>{" "}
-                        <Text style={{ fontSize: 18 }}>{proposal.item_name}</Text>{" "}
-                        <Tag color={proposal.item_match.matched_on === "manual" ? "orange" : "blue"}>
-                          {proposal.item_match.matched_on === "manual" ? "人工指定" : "影像判定"}
-                        </Tag>
-                      </div>
-                    </div>
-
-                    {proposal.decision === "lock" ? (
-                      <Alert
-                        type="info"
-                        title={`辨識到進貨日 ${proposal.recognition.receipt_date}`}
-                        description={`信心 ${(proposal.recognition.confidence * 100).toFixed(0)}%，已比對到在庫批次。請確認這是你手上那一箱。`}
-                        style={{ marginBottom: 16 }}
-                      />
-                    ) : (
-                      <Alert
-                        type="warning"
-                        title="讀不出進貨日，請自己挑批次"
-                        description={
-                          proposal.recognition.error
-                            ? `辨識服務異常：${proposal.recognition.error}`
-                            : proposal.recognition.notes || "章可能糊掉、被遮住，或這面沒有章。"
-                        }
-                        style={{ marginBottom: 16 }}
-                      />
-                    )}
-
-                    <Text strong style={{ fontSize: 16 }}>在庫批次（請確認你手上這箱）</Text>
-                    <Radio.Group
-                      value={chosenLot}
-                      onChange={(e) => setChosenLot(e.target.value)}
-                      style={{ display: "block", marginTop: 12 }}
-                    >
-                      <Space orientation="vertical" style={{ width: "100%" }} size={12}>
-                        {proposal.candidates.map((c) => (
-                          <Radio
-                            key={c.lot_id}
-                            value={c.lot_id}
-                            style={{
-                              width: "100%", minHeight: TOUCH, padding: "12px 16px",
-                              border: "1px solid #d9d9d9", borderRadius: 6, fontSize: 18,
-                              background: c.lot_id === chosenLot ? "#e6f4ff" : "#fff",
-                            }}
-                          >
-                            <Space wrap>
-                              <span style={{ fontSize: 18 }}>進貨 {c.receipt_date}</span>
-                              <Text type="secondary">製造 {c.manufacture_date ?? "—"}</Text>
-                              <Text type="secondary">在庫 {c.qty_on_hand}</Text>
-                              {fifoTarget?.lot_id === c.lot_id && <Tag color="green">FIFO 應領</Tag>}
-                            </Space>
-                          </Radio>
-                        ))}
-                      </Space>
-                    </Radio.Group>
-                    {!proposal.candidates.length && (
-                      <Empty
-                        image={Empty.PRESENTED_IMAGE_SIMPLE}
-                        description={`${proposal.item_label} 沒有可領用的在庫批次`}
-                      >
-                        <Link href="/receiving">
-                          <Button type="primary" icon={<InboxOutlined />}>去收貨建批</Button>
-                        </Link>
-                      </Empty>
-                    )}
-                  </>
-                )}
-              </Col>
-            </Row>
+            {takingWrongLot && (
+              <Alert
+                style={{ marginTop: 16 }}
+                type="warning"
+                title="這不是 FIFO 應領的那批"
+                description={`應領用進貨日 ${fifoLot?.receipt_date} 那批。仍然可以送出 —— 系統會記錄下來並擋住扣帳，等主管覆核。`}
+              />
+            )}
           </Card>
 
-          {!itemDeferred && proposal.candidates.length > 0 && (
-            <Card title="3. 填領用資訊" style={{ marginTop: 24 }}>
-              <Form form={form} layout="vertical" size="large" initialValues={{ 上下膜: "上膜" }}>
-                <Row gutter={24}>
-                  <Col xs={24} md={6}>
-                    <Form.Item name="上下膜" label="上膜／下膜" rules={[{ required: true }]}>
-                      <Radio.Group buttonStyle="solid" size="large">
-                        <Radio.Button value="上膜" style={{ height: TOUCH, lineHeight: `${TOUCH}px`, fontSize: 18 }}>上膜</Radio.Button>
-                        <Radio.Button value="下膜" style={{ height: TOUCH, lineHeight: `${TOUCH}px`, fontSize: 18 }}>下膜</Radio.Button>
-                      </Radio.Group>
-                    </Form.Item>
-                  </Col>
-                  <Col xs={24} md={6}>
-                    <Form.Item name="包裝機台" label="包裝機台" rules={[{ required: true }]}>
-                      <Select
-                        style={{ height: TOUCH }}
-                        placeholder="選機台"
-                        options={machines.map((m) => ({ value: m, label: m }))}
-                      />
-                    </Form.Item>
-                  </Col>
-                  <Col xs={24} md={6}>
-                    <Form.Item name="產品名稱" label="產品名稱" extra="現在不知道可以先跳過，事後補">
-                      <Select
-                        style={{ height: TOUCH }}
-                        allowClear
-                        placeholder="事後補"
-                        options={products.map((p) => ({ value: p, label: p }))}
-                      />
-                    </Form.Item>
-                  </Col>
-                  <Col xs={24} md={6}>
-                    <Form.Item name="使用步徑" label="使用步徑（碼表）">
-                      <Input style={{ height: TOUCH, fontSize: 18 }} placeholder="例 557" />
-                    </Form.Item>
-                  </Col>
-                </Row>
-                <Button
-                  type="primary"
-                  size="large"
-                  loading={busy}
-                  disabled={!chosenLot}
-                  onClick={submit}
-                  style={{ height: TOUCH, fontSize: 20, width: "100%" }}
-                >
-                  送出領用
-                </Button>
-              </Form>
-            </Card>
-          )}
+          <Card title="3. 數量" style={{ marginTop: 24 }}>
+            <Space align="center" size={16} wrap>
+              <Button
+                size="large" style={{ height: TOUCH, width: TOUCH, fontSize: 28 }}
+                disabled={qty <= 1}
+                onClick={() => setQty((n) => Math.max(1, n - 1))}
+              >
+                −
+              </Button>
+              <InputNumber
+                size="large"
+                min={1}
+                max={chosenLot?.qty_on_hand ?? 1}
+                value={qty}
+                onChange={(v) => setQty(Math.max(1, Number(v) || 1))}
+                style={{ width: 120, height: TOUCH, fontSize: 24 }}
+              />
+              <Button
+                size="large" style={{ height: TOUCH, width: TOUCH, fontSize: 28 }}
+                disabled={qty >= (chosenLot?.qty_on_hand ?? 1)}
+                onClick={() => setQty((n) => n + 1)}
+              >
+                ＋
+              </Button>
+              <Text style={{ fontSize: 18 }}>箱</Text>
+              <Text type="secondary">
+                這批在庫 {chosenLot?.qty_on_hand ?? 0} 箱
+              </Text>
+            </Space>
+          </Card>
+
+          <Card style={{ marginTop: 24 }}>
+            <Form form={form} layout="vertical" size="large">
+              <Collapse
+                ghost
+                items={[{
+                  key: "extra",
+                  label: <Text type="secondary">其他資訊（選填，可事後補）</Text>,
+                  children: (
+                    <Row gutter={24}>
+                      <Col xs={24} md={8}>
+                        <Form.Item name="包裝機台" label="包裝機台">
+                          <Select
+                            style={{ height: TOUCH }}
+                            allowClear
+                            placeholder="選機台"
+                            options={machines.map((m) => ({ value: m, label: m }))}
+                          />
+                        </Form.Item>
+                      </Col>
+                      <Col xs={24} md={8}>
+                        <Form.Item name="產品名稱" label="產品名稱">
+                          <Select
+                            style={{ height: TOUCH }}
+                            allowClear
+                            placeholder="包了哪個產品"
+                            options={products.map((p) => ({ value: p, label: p }))}
+                          />
+                        </Form.Item>
+                      </Col>
+                      <Col xs={24} md={8}>
+                        <Form.Item name="使用步徑" label="使用步徑（碼表）">
+                          <Input style={{ height: TOUCH, fontSize: 18 }} placeholder="例 557" />
+                        </Form.Item>
+                      </Col>
+                    </Row>
+                  ),
+                }]}
+              />
+              <Button
+                type="primary"
+                size="large"
+                loading={busy}
+                disabled={!lotId}
+                onClick={submit}
+                style={{ height: TOUCH, fontSize: 20, width: "100%", marginTop: 8 }}
+              >
+                送出領用
+              </Button>
+              <Text type="secondary" style={{ display: "block", marginTop: 12, textAlign: "center" }}>
+                {selected && chosenLot
+                  ? `領用 ${selected.label} ${qty} 箱｜進貨 ${chosenLot.receipt_date}｜製造 ${chosenLot.manufacture_date ?? "—"}`
+                  : "選好品項與批次就可以送出"}
+              </Text>
+            </Form>
+          </Card>
         </>
+      )}
+
+      {scanning && !capture && (
+        <Card style={{ marginTop: 24, textAlign: "center" }} title="辨識中">
+          <Spin size="large" />
+        </Card>
       )}
     </>
   );
@@ -370,7 +416,7 @@ function VerdictBlock({ verdict, onNext }: { verdict: NonNullable<Verdict>; onNe
       )}
       <Text style={{ color: "#fff", fontSize: 18, marginTop: 24, opacity: 0.9 }}>
         {blocked
-          ? `這一筆已存成紀錄 #${verdict.id}，包含影像與時間。重拍不會讓它消失，請去拿較早進貨的那箱。`
+          ? `這一筆已存成紀錄 #${verdict.id}，包含時間與登記人。重拍或重送不會讓它消失，請去拿較早進貨的那箱。`
           : `紀錄 #${verdict.id} 已建立。`}
       </Text>
       <Button

@@ -94,6 +94,7 @@ export default function DictionaryTable({
           {
             title: label,
             dataIndex: "value",
+            align: "center" as const,
             render: (v: string, row: DictEntry) => (
               <Input
                 defaultValue={v}
@@ -108,6 +109,7 @@ export default function DictionaryTable({
             title: "狀態",
             dataIndex: "active",
             width: 200,
+            align: "center" as const,
             render: (active: number, row: DictEntry) => (
               <Space>
                 <Switch

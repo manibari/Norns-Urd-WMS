@@ -58,14 +58,17 @@ export function useColumnWidths(tableId: string) {
     }
   }, [tableId]);
 
-  /** Apply stored widths and attach a drag handle to every sized column. */
+  /** Apply stored widths, centre content, and attach a drag handle. */
   function resizable<T>(columns: TableColumnType<T>[]): TableColumnType<T>[] {
     return columns.map((col, index) => {
       const key = String(col.key ?? col.dataIndex ?? index);
       const width = widths[key] ?? col.width;
-      if (typeof width !== "number") return col;
+      // Centring here rather than on every column definition keeps it one
+      // decision instead of a hundred, and an explicit align still wins.
+      const centred = { ...col, align: col.align ?? ("center" as const) };
+      if (typeof width !== "number") return centred;
       return {
-        ...col,
+        ...centred,
         width,
         title: (
           <ResizableTitle

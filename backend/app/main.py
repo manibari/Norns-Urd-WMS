@@ -114,6 +114,7 @@ class LotIn(BaseModel):
     meters_per_box: int | None = None
     pack_unit: str | None = None
     has_expiry: bool | None = None
+    use_recognition: bool | None = None
     supplier_code: str | None = None    # 箱上完整料號, 辨識對映用
     expiry_date: str | None = None      # 標示(有效日期). 多數包材沒有
     entered_unit: str = "米"
@@ -138,6 +139,7 @@ class ItemIn(BaseModel):
     meters_per_box: int | None = None
     pack_unit: str | None = None
     has_expiry: bool = False
+    use_recognition: bool = True
     supplier_code: str | None = None
     supplier: str | None = None
 
@@ -151,6 +153,7 @@ class ItemPatch(BaseModel):
     meters_per_box: int | None = None
     pack_unit: str | None = None
     has_expiry: bool | None = None
+    use_recognition: bool | None = None
     supplier_code: str | None = None
     supplier: str | None = None
 
@@ -172,6 +175,9 @@ class LotPatch(BaseModel):
 class ScanIn(BaseModel):
     item_id: int
     lot_id: int | None = None
+    # Usually one box, occasionally more. Defaulting to 1 keeps the common case
+    # a single tap without pretending the other case does not happen.
+    qty: int = 1
     image_path: str | None = None
     ocr_receipt_date: str | None = None
     ocr_confidence: float | None = None
@@ -508,17 +514,24 @@ def items(user: dict = Depends(current_user)) -> list[dict]:
             "   AS on_hand,"
             " COUNT(CASE WHEN l.qty_on_hand > 0 AND COALESCE(l.verdict,'合格') <> '不合格' THEN 1 END)"
             "   AS open_lots,"
-            " COALESCE(SUM(CASE WHEN l.verdict = '不合格' THEN l.qty_on_hand ELSE 0 END), 0) AS rejected_qty"
+            " COALESCE(SUM(CASE WHEN l.verdict = '不合格' THEN l.qty_on_hand ELSE 0 END), 0) AS rejected_qty,"
+            " MAX(l.receipt_date) AS last_receipt_date,"
+            " MAX(l.created_at) AS last_lot_at"
             " FROM inventory_item i LEFT JOIN inventory_lot l ON l.item_id = i.id"
-            " GROUP BY i.id ORDER BY i.name, i.model",
+            # Most recently received first: what just arrived is what people are
+            # looking for. Items with no lots yet sort last rather than first,
+            # since an empty row at the top is noise.
+            " GROUP BY i.id"
+            " ORDER BY last_lot_at IS NULL, last_lot_at DESC, last_receipt_date DESC, i.name",
         ).fetchall()
     return [
         {
             **dict(r),
             "on_hand_m": meters_from_boxes(r["on_hand"], r["meters_per_box"]),
-            # 有型號才有東西可以跟標籤對映 —— 沒型號也沒登記標籤料號的品項,
-            # 影像辨識永遠認不出來, 領用時直接人工選 (見 /api/recognize).
-            "recognisable": bool(r["model"] or r["supplier_code"]),
+            # Two conditions, and they mean different things: something on the
+            # label to match against, AND someone having decided to use it.
+            "matchable": bool(r["model"] or r["supplier_code"]),
+            "recognisable": bool(r["use_recognition"] and (r["model"] or r["supplier_code"])),
             "label": r["model"] or r["name"],
         }
         for r in rows
@@ -560,6 +573,8 @@ def update_item(item_id: int, payload: ItemPatch,
         changes["model"] = str(changes["model"]).strip() or None
     if "has_expiry" in changes:
         changes["has_expiry"] = int(bool(changes["has_expiry"]))
+    if "use_recognition" in changes:
+        changes["use_recognition"] = int(bool(changes["use_recognition"]))
     if "pack_unit" in changes:
         changes["pack_unit"] = str(changes["pack_unit"]).strip() or None
     with transaction() as conn:
@@ -651,6 +666,14 @@ def lots(item_id: int | None = None, user: dict = Depends(current_user)) -> list
         row["inspection"] = json.loads(row.get("inspection") or "{}")
         row["draw_count"] = drawn.get(row["id"], 0)
         row["item_label"] = row["item_model"] or row["item_name"]
+        received = row.get("qty_received") or row["qty_on_hand"]
+        row["qty_received"] = received
+        row["qty_drawn"] = max(0, received - row["qty_on_hand"])
+        row["lot_state"] = (
+            "已領完" if row["qty_on_hand"] <= 0
+            else "領貨中" if row["qty_on_hand"] < received
+            else "未動用"
+        )
     return rows
 
 
@@ -769,11 +792,12 @@ def create_lot(payload: LotIn, user: dict = Depends(requires("lot.create"))) -> 
                 raise HTTPException(409, f"型號 {model} 已存在，請直接選那個品項")
             cursor = conn.execute(
                 "INSERT INTO inventory_item (name, model, spec, unit, shelf_life_days, safety_stock,"
-                " meters_per_box, pack_unit, has_expiry, supplier_code, supplier)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " meters_per_box, pack_unit, has_expiry, use_recognition, supplier_code, supplier)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (payload.item_name.strip(), model, payload.spec, payload.unit,
                  payload.shelf_life_days, payload.safety_stock, payload.meters_per_box,
                  payload.pack_unit, int(bool(payload.has_expiry)),
+                 int(payload.use_recognition if payload.use_recognition is not None else True),
                  payload.supplier_code, payload.supplier),
             )
             item_id = cursor.lastrowid
@@ -847,8 +871,8 @@ def create_lot(payload: LotIn, user: dict = Depends(requires("lot.create"))) -> 
         cursor = conn.execute(
             "INSERT INTO inventory_lot (item_id, receipt_date, manufacture_date, expiry_date,"
             " supplier_lot_code, supplier, entered_meters, entered_unit, inspection, verdict,"
-            " recorded_by, confirmed_by, remark, qty_on_hand, created_at, created_by)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " recorded_by, confirmed_by, remark, qty_received, qty_on_hand, created_at, created_by)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (item_id, parsed.iso, manufacture.iso if manufacture else None,
              expiry.iso if expiry else None, payload.supplier_lot_code, payload.supplier,
              payload.qty_meters, payload.entered_unit,
@@ -856,7 +880,7 @@ def create_lot(payload: LotIn, user: dict = Depends(requires("lot.create"))) -> 
              # 記錄人 is who is signed in, not a name picked from a list. Dual
              # sign-off is the form's control point; a dropdown of names lets
              # anyone sign as anyone and the control means nothing.
-             user["name"], payload.confirmed_by, payload.remark, qty, now(), user["name"]),
+             user["name"], payload.confirmed_by, payload.remark, qty, qty, now(), user["name"]),
         )
         lot_id = cursor.lastrowid
         log(conn, user["name"], "lot.create",
@@ -921,14 +945,16 @@ async def recognize(image: UploadFile = File(...), item_id: int | None = Form(de
         reading = Recognition(error=str(exc))
 
     with transaction() as conn:
+        # Items with recognition switched off are excluded from matching
+        # entirely — that is what switching it off means.
         master = [(str(r["id"]), r["model"], r["supplier_code"]) for r in conn.execute(
-            "SELECT id, model, supplier_code FROM inventory_item").fetchall()]
+            "SELECT id, model, supplier_code FROM inventory_item WHERE use_recognition = 1").fetchall()]
         catalogue = [
             {**dict(r), "label": r["model"] or r["name"],
-             # 有型號或登記過標籤料號才有東西可以對映; 其餘品項一律人工選.
-             "recognisable": bool(r["model"] or r["supplier_code"])}
+             "recognisable": bool(r["use_recognition"] and (r["model"] or r["supplier_code"]))}
             for r in conn.execute(
                 "SELECT i.id, i.name, i.model, i.spec, i.meters_per_box, i.supplier_code,"
+                " i.use_recognition,"
                 "       COALESCE(SUM(CASE WHEN COALESCE(l.verdict, '合格') <> '不合格'"
                 "                          THEN l.qty_on_hand ELSE 0 END), 0) AS on_hand"
                 " FROM inventory_item i LEFT JOIN inventory_lot l ON l.item_id = i.id"
@@ -1060,11 +1086,23 @@ def create_scan(payload: ScanIn, user: dict = Depends(requires("issue.create")))
             log(conn, user["name"], "scan.blocked_unreadable", {"scan_id": scan_id})
             return {"id": scan_id, "status": "blocked_unreadable"}
 
+        if payload.qty < 1:
+            raise HTTPException(400, "領用數量至少 1 箱")
+
         lot = conn.execute("SELECT * FROM inventory_lot WHERE id = ?", (payload.lot_id,)).fetchone()
         if lot is None:
             raise HTTPException(404, "批次不存在")
         if lot["qty_on_hand"] < 1:
             raise HTTPException(409, "該批次已無庫存")
+        if payload.qty > lot["qty_on_hand"]:
+            # Refused rather than clamped: a request for more than exists means
+            # the operator and the books disagree, and silently issuing fewer
+            # would hide that.
+            raise HTTPException(
+                409,
+                f"這批只剩 {lot['qty_on_hand']} 箱，領不了 {payload.qty} 箱。"
+                " 若實際數量不符，請找管理者修正批次數量。",
+            )
 
         ok, expected_date = _fifo_verdict(candidates, str(payload.lot_id))
         expected_ids = fifo_expected(candidates)
@@ -1081,9 +1119,11 @@ def create_scan(payload: ScanIn, user: dict = Depends(requires("issue.create")))
         # Stock movement and record, one transaction (US-2).
         scan_id = _insert_scan(conn, payload, status="posted", lot_id=payload.lot_id,
                                fifo_expected=(expected_id, expected_date), user=user)
-        conn.execute("UPDATE inventory_lot SET qty_on_hand = qty_on_hand - 1 WHERE id = ? AND qty_on_hand > 0",
-                     (payload.lot_id,))
-        log(conn, user["name"], "scan.posted", {"scan_id": scan_id, "lot_id": payload.lot_id})
+        conn.execute("UPDATE inventory_lot SET qty_on_hand = qty_on_hand - ?"
+                     " WHERE id = ? AND qty_on_hand >= ?",
+                     (payload.qty, payload.lot_id, payload.qty))
+        log(conn, user["name"], "scan.posted",
+            {"scan_id": scan_id, "lot_id": payload.lot_id, "qty": payload.qty})
         return {"id": scan_id, "status": "posted"}
 
 
@@ -1092,12 +1132,12 @@ def _insert_scan(conn, payload: ScanIn, *, status: str, lot_id: int | None,
     cursor = conn.execute(
         "INSERT INTO material_usage_scan (item_id, lot_id, status, captured_at, captured_by,"
         " image_path, ocr_receipt_date, ocr_confidence, ocr_notes, match_distance,"
-        " fifo_expected_lot_id, fifo_expected_date, field_values, detail_pending, created_at)"
-        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        " fifo_expected_lot_id, fifo_expected_date, field_values, detail_pending, qty, created_at)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (payload.item_id, lot_id, status, now(), user["name"], payload.image_path,
          payload.ocr_receipt_date, payload.ocr_confidence, payload.ocr_notes, payload.match_distance,
          fifo_expected[0], fifo_expected[1], json.dumps(payload.fields, ensure_ascii=False),
-         int(payload.detail_pending), now()),
+         int(payload.detail_pending), payload.qty, now()),
     )
     return int(cursor.lastrowid)
 
@@ -1139,9 +1179,10 @@ def override(scan_id: int, payload: OverrideIn,
         conn.execute(
             "UPDATE material_usage_scan SET status = 'overridden', override_by = ?, override_reason = ?"
             " WHERE id = ?", (user["name"], payload.reason, scan_id))
-        conn.execute("UPDATE inventory_lot SET qty_on_hand = qty_on_hand - 1"
-                     " WHERE id = ? AND qty_on_hand > 0", (row["lot_id"],))
-        log(conn, payload.actor, "scan.overridden", {"scan_id": scan_id, "reason": payload.reason})
+        conn.execute("UPDATE inventory_lot SET qty_on_hand = qty_on_hand - ?"
+                     " WHERE id = ? AND qty_on_hand >= ?",
+                     (row["qty"], row["lot_id"], row["qty"]))
+        log(conn, user["name"], "scan.overridden", {"scan_id": scan_id, "reason": payload.reason})
     return {"id": scan_id, "status": "overridden"}
 
 

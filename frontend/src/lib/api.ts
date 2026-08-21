@@ -22,6 +22,12 @@ export type Lot = {
   recorded_by: string | null;
   confirmed_by: string | null;
   remark: string | null;
+  /** 收進來幾箱（不變） */
+  qty_received: number;
+  /** 已經領走幾箱 */
+  qty_drawn: number;
+  /** 未動用 | 領貨中 | 已領完 */
+  lot_state: "未動用" | "領貨中" | "已領完";
   qty_on_hand: number;
   is_fifo_next: boolean;
 };
@@ -34,7 +40,11 @@ export type Item = {
   model: string | null;
   /** 型號優先，沒型號就顯示名稱 */
   label: string;
-  /** 有型號或登記過標籤料號才可能被影像辨識認出 */
+  /** 標籤上有東西可對映（有型號或箱上料號）。這是「認得出」的先決條件 */
+  matchable: boolean;
+  /** 是否啟用影像辨識。可自行開關 */
+  use_recognition: number;
+  /** 實際會不會走辨識 = 有東西可對映 且 已啟用 */
   recognisable: boolean;
   spec: string | null;
   unit: string;
@@ -48,6 +58,9 @@ export type Item = {
   /** 這個品項有沒有保存期限。有的話收貨必須留下到期依據 */
   has_expiry: number;
   rejected_qty: number;
+  /** 最近一次進貨日／建批時間，庫存總覽用來把最新的排在最上面 */
+  last_receipt_date: string | null;
+  last_lot_at: string | null;
   /** 箱上標籤的完整料號，影像辨識對映用 */
   supplier_code: string | null;
   supplier: string | null;
@@ -113,6 +126,8 @@ export type Scan = {
   item_model: string | null;
   item_label: string | null;
   lot_id: number | null;
+  /** 這次領幾箱 */
+  qty: number;
   status: "posted" | "blocked_fifo" | "blocked_unreadable" | "overridden" | "voided";
   captured_at: string;
   captured_by: string;

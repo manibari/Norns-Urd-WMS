@@ -38,6 +38,9 @@ CREATE TABLE IF NOT EXISTS inventory_item (
     -- 有沒有保存期限. 有的話收貨必須留下到期依據 (標示有效日期, 或製造日+保存天數).
     -- 驗收單註記: 肉乾真空膜不需填有效日期, 肉鬆產品要填 —— 這是品項的性質.
     has_expiry       INTEGER NOT NULL DEFAULT 0,
+    -- 要不要讓這個品項走影像辨識. 有型號/料號只代表「認得出來」, 這個欄位是
+    -- 「要不要用」—— 標籤太小、常辨錯的品項可以關掉, 直接走人工.
+    use_recognition  INTEGER NOT NULL DEFAULT 1,
     -- 箱上標籤印的完整料號 (例 2003.T7320BC-340X900-P1). 人不填這個, 影像辨識讀到的
     -- 是它, 用來對映回品項 (requirement 4 正規化對映表).
     supplier_code    TEXT,
@@ -65,6 +68,9 @@ CREATE TABLE IF NOT EXISTS inventory_lot (
     recorded_by       TEXT,
     confirmed_by      TEXT,
     remark            TEXT,
+    -- 收進來幾箱 (不變) 與現在剩幾箱 (遞減). 兩個都留才分得出「還沒動」「領貨中」
+    -- 「已領完」—— 只看剩餘量的話, 剩 3 箱可能是收 3 箱沒動, 也可能是收 10 箱領了 7.
+    qty_received      INTEGER,
     qty_on_hand       INTEGER NOT NULL,
     created_at        TEXT NOT NULL,
     created_by        TEXT NOT NULL
@@ -74,6 +80,7 @@ CREATE TABLE IF NOT EXISTS material_usage_scan (
     id                   INTEGER PRIMARY KEY AUTOINCREMENT,
     item_id              INTEGER REFERENCES inventory_item(id),
     lot_id               INTEGER REFERENCES inventory_lot(id),
+    qty                  INTEGER NOT NULL DEFAULT 1,   -- 這次領幾箱
     status               TEXT NOT NULL,   -- posted | blocked_fifo | blocked_unreadable | overridden | voided
     captured_at          TEXT NOT NULL,
     captured_by          TEXT NOT NULL,
@@ -188,6 +195,9 @@ _ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("app_user", "title", "title TEXT"),
     ("inventory_item", "pack_unit", "pack_unit TEXT"),
     ("inventory_item", "has_expiry", "has_expiry INTEGER NOT NULL DEFAULT 0"),
+    ("inventory_item", "use_recognition", "use_recognition INTEGER NOT NULL DEFAULT 1"),
+    ("material_usage_scan", "qty", "qty INTEGER NOT NULL DEFAULT 1"),
+    ("inventory_lot", "qty_received", "qty_received INTEGER"),
 )
 
 

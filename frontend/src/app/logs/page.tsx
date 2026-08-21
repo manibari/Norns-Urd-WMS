@@ -112,11 +112,11 @@ export default function LogsPage() {
           dataSource={filtered}
           locale={{ emptyText: <Empty description="沒有符合的紀錄" image={Empty.PRESENTED_IMAGE_SIMPLE} /> }}
           columns={[
-            { title: "時間", dataIndex: "at", width: 165,
+            { title: "時間", dataIndex: "at", width: 165, align: "center" as const,
               render: (v: string) => v.slice(0, 19).replace("T", " ") },
-            { title: "操作者", dataIndex: "actor", width: 120 },
+            { title: "操作者", dataIndex: "actor", width: 120, align: "center" as const },
             {
-              title: "動作", dataIndex: "action", width: 140,
+              title: "動作", dataIndex: "action", width: 140, align: "center" as const,
               render: (v: string) => <Tag>{ACTION_LABELS[v] ?? v}</Tag>,
             },
             {

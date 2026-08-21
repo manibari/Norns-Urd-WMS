@@ -133,7 +133,8 @@ export default function BasicsPage() {
       >
         <Space style={{ marginBottom: 12 }} wrap>
           <Text type="secondary">
-            直接在格子裡改，離開欄位就存。原物料名稱必填，其餘都可留空。欄位邊界可拖曳調寬。
+            這裡只有基本資料，不看庫存 —— 現在有多少去「庫存總覽」。
+          直接在格子裡改，離開欄位就存；原物料名稱必填，其餘都可留空。欄位邊界可拖曳調寬。
           </Text>
           {itemCols.hasCustomWidths && (
             <Button size="small" type="link" onClick={itemCols.reset}>欄寬還原</Button>
@@ -144,7 +145,7 @@ export default function BasicsPage() {
           dataSource={items}
           pagination={false}
           size="middle"
-          scroll={{ x: 1560 }}
+          scroll={{ x: 1420 }}
           locale={{ emptyText: <Empty description="尚無品項" image={Empty.PRESENTED_IMAGE_SIMPLE} /> }}
           columns={itemCols.resizable([
             {
@@ -161,13 +162,27 @@ export default function BasicsPage() {
               ),
             },
             {
-              title: "影像辨識", width: 90, align: "center" as const,
+              // Switchable, not derived: having a 型號 only means the label CAN
+              // be matched — whether to actually use recognition for this item
+              // is a judgement (small label, keeps misreading) that belongs to
+              // whoever maintains the master.
+              title: "影像辨識", width: 150, align: "center" as const,
               render: (_, row: Item) => (
-                <Tooltip title={row.recognisable
-                  ? "有型號或箱上料號，領用可用拍照辨識"
-                  : "沒有型號也沒登記箱上料號 —— 標籤上沒東西可對映，領用時人工選"}>
-                  {row.recognisable ? <Tag color="blue">可辨識</Tag> : <Tag>人工選</Tag>}
-                </Tooltip>
+                <Space size={4}>
+                  <Tooltip title={row.matchable
+                    ? "關掉的話，這個品項的領用一律人工選"
+                    : "沒有型號也沒登記箱上料號 —— 標籤上沒東西可對映，開了也認不出"}>
+                    <Switch
+                      size="small"
+                      checked={Boolean(row.use_recognition)}
+                      disabled={!row.matchable}
+                      onChange={(next) => patchField(row, "use_recognition", next)}
+                    />
+                  </Tooltip>
+                  {row.recognisable
+                    ? <Tag color="blue">辨識</Tag>
+                    : <Tag>{row.matchable ? "已關閉" : "無可對映"}</Tag>}
+                </Space>
               ),
             },
             {
@@ -220,19 +235,6 @@ export default function BasicsPage() {
               ),
             },
             {
-              title: "在庫", dataIndex: "on_hand", width: 130, align: "right" as const,
-              render: (v: number, row: Item) => (
-                <span style={{ paddingInlineEnd: 8 }}>
-                  {v} 箱
-                  {row.on_hand_m != null && (
-                    <Text type="secondary">
-                      （{row.on_hand_m.toLocaleString()}{row.pack_unit ?? ""}）
-                    </Text>
-                  )}
-                </span>
-              ),
-            },
-            {
               // Whether an item expires at all is a property of the item (the
               // form's note 1: 肉乾真空膜 needs no expiry date, 肉鬆 does). Saying
               // "yes" then makes receiving insist on something to expire from,
@@ -263,7 +265,9 @@ export default function BasicsPage() {
               ),
             },
             {
-              title: "安全水位", dataIndex: "safety_stock", width: 100, align: "right" as const,
+              // Kept because it is a setting, unlike on-hand which is a fact
+              // about today and belongs on 庫存總覽.
+              title: "安全水位", dataIndex: "safety_stock", width: 110,
               render: (v: number, row: Item) => (
                 <NumberCell value={v} min={0} placeholder="未設"
                             onSave={(next) => patchField(row, "safety_stock", next ?? 0)} />
@@ -464,12 +468,12 @@ function UsersPanel({
         dataSource={users}
         scroll={{ x: 1020 }}
         columns={[
-          { title: "帳號", dataIndex: "username", width: 110,
+          { title: "帳號", dataIndex: "username", width: 110, align: "center" as const,
             render: (v: string) => <Text code style={{ whiteSpace: "nowrap" }}>{v}</Text> },
-          { title: "顯示名", dataIndex: "name", width: 100,
+          { title: "顯示名", dataIndex: "name", width: 100, align: "center" as const,
             render: (v: string) => <Text strong style={{ whiteSpace: "nowrap" }}>{v}</Text> },
           {
-            title: "職位", dataIndex: "title", width: 180,
+            title: "職位", dataIndex: "title", width: 180, align: "center" as const,
             render: (v: string | null, row) => (
               <CreatableSelect
                 value={v ?? undefined}
@@ -484,7 +488,7 @@ function UsersPanel({
             ),
           },
           {
-            title: "權限層級", dataIndex: "role", width: 300,
+            title: "權限層級", dataIndex: "role", width: 300, align: "center" as const,
             render: (v: string, row) => (
               <Select
                 value={v}
@@ -495,7 +499,7 @@ function UsersPanel({
             ),
           },
           {
-            title: "狀態", dataIndex: "active", width: 170,
+            title: "狀態", dataIndex: "active", width: 170, align: "center" as const,
             render: (active: number, row) => (
               <Space>
                 <Switch

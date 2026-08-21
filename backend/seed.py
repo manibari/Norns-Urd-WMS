@@ -23,11 +23,13 @@ TODAY = date.today()
 ITEMS = [
     # 名稱, 型號, 規格, 保存天數, 安全水位, 每箱數量, 單位, 有效期, 箱上完整料號, 廠商
     # 膜類不需填有效日期 (驗收單註記 1), 脫氧劑要 —— 這是品項的性質, 不是規則例外.
-    ("高阻氧食品包裝拉伸膜", "T7320BC", "340mm x 900M", 540, 3, 900, "米", False,
+    # Names are the real ones off the form. Note they already say 上膜/下膜 —
+    # which is why issuing does not ask again.
+    ("休閒豬上膜", "T7320BC", "340mm x 900M", 540, 3, 900, "米", False,
      "2003.T7320BC-340X900-P1", "臺灣希悅爾"),
-    ("食品包裝拉伸膜", "T6240BA", "334mm x 600M", 540, 2, 600, "米", False,
+    ("大包裝肉乾上膜", "T6240BA", "334mm x 600M", 540, 2, 600, "米", False,
      "2003.T6240BA-334X600", "臺灣希悅爾"),
-    ("食品包裝拉伸膜", "T6050BSW", "300mm x 600M", 540, 2, 600, "米", False, None, "臺灣希悅爾"),
+    ("真空切片休閒下膜", "T6050BSW", "300mm x 600M", 540, 2, 600, "米", False, None, "臺灣希悅爾"),
     # 無型號: 只能人工選, 不走影像辨識. 有保存期限: 收貨必須留下到期依據.
     ("脫氧劑", None, "100cc", 730, 5, 500, "包", True, None, "弘東京"),
 ]
@@ -88,20 +90,21 @@ def main() -> int:
         for name, model, spec, shelf, safety, packsize, unit, expiry, long_code, supplier in ITEMS:
             cursor = conn.execute(
                 "INSERT INTO inventory_item (name, model, spec, unit, shelf_life_days,"
-                " safety_stock, meters_per_box, pack_unit, has_expiry, supplier_code, supplier)"
-                " VALUES (?,?,?,'箱',?,?,?,?,?,?,?)",
-                (name, model, spec, shelf, safety, packsize, unit, int(expiry), long_code, supplier))
+                " safety_stock, meters_per_box, pack_unit, has_expiry, use_recognition,"
+                " supplier_code, supplier) VALUES (?,?,?,'箱',?,?,?,?,?,?,?,?)",
+                (name, model, spec, shelf, safety, packsize, unit, int(expiry),
+                 1 if model or long_code else 0, long_code, supplier))
             item_ids.append(cursor.lastrowid)
         for idx, receipt, manufacture, expiry, roll, qty, entered, unit, verdict, remark in LOTS:
             conn.execute(
                 "INSERT INTO inventory_lot (item_id, receipt_date, manufacture_date, expiry_date,"
                 " supplier_lot_code, supplier, entered_meters, entered_unit, inspection, verdict,"
-                " recorded_by, confirmed_by, remark, qty_on_hand, created_at, created_by)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'seed')",
+                " recorded_by, confirmed_by, remark, qty_received, qty_on_hand, created_at, created_by)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'seed')",
                 (item_ids[idx], receipt.isoformat(), manufacture, expiry, roll,
                  ITEMS[idx][9], entered, unit,
                  INSPECTION_PASS if verdict == "合格" else INSPECTION_FAIL, verdict,
-                 "郭", "黃揚文", remark, qty, now()))
+                 "郭", "黃揚文", remark, qty, qty, now()))
         from app.auth import DEFAULT_ROLE_LABELS, hash_password
         for order, (code, label) in enumerate(DEFAULT_ROLE_LABELS.items()):
             conn.execute("INSERT OR IGNORE INTO app_role (code, label, sort_order) VALUES (?,?,?)",

@@ -108,13 +108,14 @@ export default function RecordsPage() {
             ),
           }}
           columns={[
-            { title: "#", dataIndex: "id", width: 64 },
-            { title: "時間", dataIndex: "captured_at", render: (v: string) => v.slice(0, 16).replace("T", " ") },
-            { title: "品項", dataIndex: "item_label", render: (v) => v ?? "—" },
-            { title: "取用批次", dataIndex: "receipt_date", render: (v) => v ?? "—" },
+            { title: "#", dataIndex: "id", width: 64, align: "center" as const },
+            { title: "時間", dataIndex: "captured_at", align: "center" as const, render: (v: string) => v.slice(0, 16).replace("T", " ") },
+            { title: "品項", dataIndex: "item_label", align: "center" as const, render: (v) => v ?? "—" },
+            { title: "取用批次", dataIndex: "receipt_date", align: "center" as const, render: (v) => v ?? "—" },
             {
               title: "狀態",
               dataIndex: "status",
+              align: "center" as const,
               render: (v: Scan["status"], row) => (
                 <Space>
                   <Tag color={STATUS[v].color}>{STATUS[v].label}</Tag>
