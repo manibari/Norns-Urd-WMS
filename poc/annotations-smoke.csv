@@ -1,0 +1,5 @@
+photo_id,item_code,receipt_date_truth,manufacture_date_truth,stratum,candidate_lots,notes
+IMG_2928.jpg,2003.T7320BC-340X900-P1,2026-08-12,2025-09-26,stamp_side_visible,2026-08-12|2026-04-10|2026-03-03,側面雙標籤+紅色驗收章
+IMG_2929.jpg,2003.T7320BC-340X900-P1,2026-08-12,2025-09-26,stamp_side_visible,2026-08-12|2026-04-10|2026-03-03,同箱另一角度
+IMG_2930.jpg,2003.T6240BA-334X600,,2025-06-01,no_stamp_on_this_face,2026-07-20|2026-05-15,頂面俯拍只有中文標;章在側面被遮;正確行為是回 null
+IMG_2921.jpg,,,,paper_form_not_a_box,2026-04-10|2026-03-03,紙本表單本體非箱子;表單上印有 20260410/20260303;讀成箱子即為誤命中
