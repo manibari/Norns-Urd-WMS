@@ -81,6 +81,18 @@ CREATE TABLE IF NOT EXISTS material_usage_scan (
     created_at           TEXT NOT NULL
 );
 
+-- 下拉選項的字典. 收貨與領用的每個選單都從這裡來, 不是寫死在程式或前端.
+-- 這是 US-11 廠別配置的第一塊: 換一家工廠, 換這張表的內容, 不動程式.
+CREATE TABLE IF NOT EXISTS dictionary (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    category   TEXT NOT NULL,   -- supplier | material_name | spec | staff | machine | packed_product | override_reason
+    value      TEXT NOT NULL,
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    active     INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    UNIQUE (category, value)
+);
+
 CREATE TABLE IF NOT EXISTS audit_log (
     id      INTEGER PRIMARY KEY AUTOINCREMENT,
     at      TEXT NOT NULL,

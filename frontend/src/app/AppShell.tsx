@@ -20,12 +20,14 @@ const { Sider, Content } = Layout;
 // Landing on 收貨建批 also means a fresh install opens on the only screen that
 // can do anything — the issuing screen has an empty candidate set until stock exists.
 const NAV = [
-  { key: "/", icon: <InboxOutlined />, label: <Link href="/">1. 收貨建批</Link> },
-  { key: "/issue", icon: <CameraOutlined />, label: <Link href="/issue">2. 領用登錄</Link> },
-  { key: "/records", icon: <ProfileOutlined />, label: <Link href="/records">3. 紀錄與追溯</Link> },
+  // 基本資料 is first because it is first in the pipeline, not because it is
+  // settings: without a 型號 there is nothing to receive, and without machines
+  // and products there is nothing to record a draw against.
+  { key: "/basics", icon: <TableOutlined />, label: <Link href="/basics">1. 基本資料</Link> },
+  { key: "/", icon: <InboxOutlined />, label: <Link href="/">2. 收貨建批</Link> },
+  { key: "/issue", icon: <CameraOutlined />, label: <Link href="/issue">3. 領用登錄</Link> },
+  { key: "/records", icon: <ProfileOutlined />, label: <Link href="/records">4. 紀錄與追溯</Link> },
   { key: "/alerts", icon: <AlertOutlined />, label: <Link href="/alerts">提醒</Link> },
-  // Master data, not a pipeline step — hence unnumbered and last.
-  { key: "/items", icon: <TableOutlined />, label: <Link href="/items">品項與米數</Link> },
 ];
 
 export default function AppShell({ children }: { children: React.ReactNode }) {

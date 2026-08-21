@@ -159,6 +159,99 @@ class OverrideIn(BaseModel):
     actor: str = "demo.supervisor"
 
 
+# --------------------------------------------------------------------------- dictionary
+
+# Every dropdown in the app is fed from here. Retiring a value deactivates it
+# rather than deleting it, because historical records reference it and a
+# traceability report that renders a blank where a machine used to be is worse
+# than one naming a machine that no longer exists.
+DICTIONARY_CATEGORIES: dict[str, str] = {
+    "supplier": "廠商名稱",
+    "material_name": "原物料名稱",
+    "spec": "規格",
+    "staff": "人員（記錄人／確認人）",
+    "machine": "包裝機台",
+    "packed_product": "包裝產品",
+    "override_reason": "非 FIFO 覆核原因",
+}
+
+
+class DictionaryIn(BaseModel):
+    category: str
+    value: str
+    sort_order: int = 0
+
+
+class DictionaryPatch(BaseModel):
+    value: str | None = None
+    sort_order: int | None = None
+    active: bool | None = None
+
+
+@app.get("/api/dictionary")
+def dictionary(category: str | None = None, include_inactive: bool = False) -> dict:
+    sql = "SELECT * FROM dictionary WHERE 1=1"
+    params: list = []
+    if category:
+        sql += " AND category = ?"
+        params.append(category)
+    if not include_inactive:
+        sql += " AND active = 1"
+    sql += " ORDER BY category, sort_order, value"
+    with transaction() as conn:
+        rows = [dict(r) for r in conn.execute(sql, params).fetchall()]
+    grouped: dict[str, list] = {key: [] for key in DICTIONARY_CATEGORIES}
+    for row in rows:
+        grouped.setdefault(row["category"], []).append(row)
+    return {"categories": DICTIONARY_CATEGORIES, "entries": grouped}
+
+
+@app.post("/api/dictionary")
+def create_dictionary_entry(payload: DictionaryIn) -> dict:
+    if payload.category not in DICTIONARY_CATEGORIES:
+        raise HTTPException(400, f"未知的字典類別 {payload.category}")
+    value = payload.value.strip()
+    if not value:
+        raise HTTPException(400, "值不可空白")
+    with transaction() as conn:
+        existing = conn.execute(
+            "SELECT id, active FROM dictionary WHERE category = ? AND value = ?",
+            (payload.category, value)).fetchone()
+        if existing:
+            if existing["active"]:
+                raise HTTPException(409, f"「{value}」已存在")
+            # Re-adding a retired value revives the original row so historical
+            # records keep pointing at the same entry.
+            conn.execute("UPDATE dictionary SET active = 1 WHERE id = ?", (existing["id"],))
+            log(conn, DEMO_USER, "dictionary.revive", {"id": existing["id"], "value": value})
+            return {"id": existing["id"], "value": value, "revived": True}
+        cursor = conn.execute(
+            "INSERT INTO dictionary (category, value, sort_order, created_at) VALUES (?,?,?,?)",
+            (payload.category, value, payload.sort_order, now()))
+        log(conn, DEMO_USER, "dictionary.create", {"category": payload.category, "value": value})
+    return {"id": cursor.lastrowid, "value": value, "revived": False}
+
+
+@app.patch("/api/dictionary/{entry_id}")
+def update_dictionary_entry(entry_id: int, payload: DictionaryPatch) -> dict:
+    changes = {k: v for k, v in payload.model_dump().items() if v is not None}
+    if not changes:
+        raise HTTPException(400, "沒有要更新的欄位")
+    if "value" in changes:
+        changes["value"] = str(changes["value"]).strip()
+        if not changes["value"]:
+            raise HTTPException(400, "值不可空白")
+    if "active" in changes:
+        changes["active"] = int(bool(changes["active"]))
+    with transaction() as conn:
+        if not conn.execute("SELECT 1 FROM dictionary WHERE id = ?", (entry_id,)).fetchone():
+            raise HTTPException(404, "字典項目不存在")
+        conn.execute(f"UPDATE dictionary SET {', '.join(f'{k} = ?' for k in changes)} WHERE id = ?",
+                     (*changes.values(), entry_id))
+        log(conn, DEMO_USER, "dictionary.update", {"id": entry_id, **changes})
+    return {"id": entry_id, **changes}
+
+
 # --------------------------------------------------------------------------- master data
 
 @app.get("/api/health")
@@ -295,9 +388,16 @@ def create_lot(payload: LotIn) -> dict:
                 conn.execute(f"UPDATE inventory_item SET {', '.join(updates)} WHERE item_code = ?",
                              (*params, item_code))
                 log(conn, DEMO_USER, "item.update", {"item_code": item_code, "changed": updates})
+        # One delivery can arrive as several manufacture-date batches, and the form
+        # records them as separate lines — so same 型號 + same receipt date is
+        # NORMAL, not a duplicate. Only an identical manufacture date makes it
+        # look like the same lot entered twice. Warning on the normal case would
+        # train people to dismiss the warning, and then the real one goes unread.
         existing = conn.execute(
-            "SELECT id, qty_on_hand FROM inventory_lot WHERE item_code = ? AND receipt_date = ?",
-            (item_code, parsed.iso),
+            "SELECT id, qty_on_hand FROM inventory_lot"
+            " WHERE item_code = ? AND receipt_date = ?"
+            "   AND COALESCE(manufacture_date, '') = COALESCE(?, '')",
+            (item_code, parsed.iso, manufacture.iso if manufacture else None),
         ).fetchone()
         qty = payload.qty
         conversion = None
@@ -349,9 +449,9 @@ def create_lot(payload: LotIn) -> dict:
         # Surfaced, never rounded away: metres that do not divide into whole
         # boxes are a real discrepancy the warehouse should see (units.py).
         "conversion_note": conversion.note if conversion else None,
-        # Surfaced rather than auto-merged: whether two deliveries on one day are
-        # one lot or two is the warehouse's call, not the system's (US-1).
-        "same_day_lot_exists": bool(existing),
+        # Surfaced rather than auto-merged: whether two identical lines are one
+        # lot or two is the warehouse's call, not the system's (US-1).
+        "duplicate_lot_exists": bool(existing),
     }
 
 

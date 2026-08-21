@@ -111,6 +111,19 @@ export type Alerts = {
   rejected: (Lot & { name: string })[];
 };
 
+export type DictEntry = {
+  id: number;
+  category: string;
+  value: string;
+  sort_order: number;
+  active: number;
+};
+
+export type Dictionary = {
+  categories: Record<string, string>;
+  entries: Record<string, DictEntry[]>;
+};
+
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, { cache: "no-store", ...init });
   if (!res.ok) {
@@ -135,7 +148,7 @@ export const api = {
       id: number;
       receipt_date: string;
       created_item: boolean;
-      same_day_lot_exists: boolean;
+      duplicate_lot_exists: boolean;
       qty: number;
       conversion_note: string | null;
       verdict: string | null;
@@ -162,4 +175,14 @@ export const api = {
   override: (id: number, reason: string) =>
     req<{ id: number; status: string }>(`/api/scans/${id}/override`, json({ reason })),
   alerts: () => req<Alerts>("/api/alerts"),
+  dictionary: (includeInactive = false) =>
+    req<Dictionary>(`/api/dictionary${includeInactive ? "?include_inactive=true" : ""}`),
+  addDictEntry: (category: string, value: string) =>
+    req<{ id: number; value: string; revived: boolean }>("/api/dictionary", json({ category, value })),
+  patchDictEntry: (id: number, body: Record<string, unknown>) =>
+    req<Record<string, unknown>>(`/api/dictionary/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
 };

@@ -12,7 +12,7 @@
 
 import { Button, Card, Descriptions, Empty, Form, Input, Modal, Select, Space, Table, Tag, Typography, message } from "antd";
 import { useCallback, useEffect, useState } from "react";
-import { api, type Scan } from "@/lib/api";
+import { api, type Dictionary, type Scan } from "@/lib/api";
 
 const { Title, Text } = Typography;
 
@@ -24,17 +24,21 @@ const STATUS: Record<Scan["status"], { color: string; label: string }> = {
   voided: { color: "default", label: "已作廢" },
 };
 
-const REASONS = ["試產指定批", "舊批破損不可用", "規格臨時變更", "急單", "其他"];
+
 
 export default function RecordsPage() {
   const [rows, setRows] = useState<Scan[]>([]);
+  const [dict, setDict] = useState<Dictionary | null>(null);
+  const reasons = (dict?.entries.override_reason ?? []).map((e) => e.value);
   const [target, setTarget] = useState<Scan | null>(null);
   const [busy, setBusy] = useState(false);
   const [form] = Form.useForm();
 
   const load = useCallback(async () => {
     try {
-      setRows(await api.scans());
+      const [scans, d] = await Promise.all([api.scans(), api.dictionary()]);
+      setRows(scans);
+      setDict(d);
     } catch (e) {
       message.error((e as Error).message);
     }
@@ -150,7 +154,7 @@ export default function RecordsPage() {
         </Text>
         <Form form={form} layout="vertical" style={{ marginTop: 16 }}>
           <Form.Item name="reason" label="原因" rules={[{ required: true, message: "必須填原因" }]}>
-            <Select options={REASONS.map((r) => ({ value: r, label: r }))} placeholder="選擇原因" />
+            <Select options={reasons.map((r) => ({ value: r, label: r }))} placeholder="選擇原因" />
           </Form.Item>
           <Form.Item
             noStyle

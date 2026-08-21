@@ -26,14 +26,12 @@ import {
   Row, Select, Space, Spin, Tag, Typography, message,
 } from "antd";
 import Link from "next/link";
-import { useMemo, useRef, useState } from "react";
-import { api, type Proposal } from "@/lib/api";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { api, type Dictionary, type Proposal } from "@/lib/api";
 
 const { Title, Text } = Typography;
 
 const TOUCH = 64;
-const MACHINES = ["D-003", "D-004", "D-023", "D-027"];
-const PRODUCTS = ["經典", "豬切", "牛切", "休閒豬", "金尊", "海香", "魚絲", "雞脆"];
 
 const ITEM_DEFER_COPY: Record<string, string> = {
   no_code_read: "標籤上的料號讀不出來",
@@ -45,6 +43,12 @@ type Verdict = { status: string; id: number; expected?: string } | null;
 
 export default function IssuePage() {
   const [busy, setBusy] = useState(false);
+  // Machines and products are this factory's configuration (基本資料), not the
+  // product's — the paper form lists them in its own notes.
+  const [dict, setDict] = useState<Dictionary | null>(null);
+  useEffect(() => { api.dictionary().then(setDict).catch(() => undefined); }, []);
+  const machines = (dict?.entries.machine ?? []).map((e) => e.value);
+  const products = (dict?.entries.packed_product ?? []).map((e) => e.value);
   const [proposal, setProposal] = useState<Proposal | null>(null);
   const [chosenLot, setChosenLot] = useState<number>();
   const [verdict, setVerdict] = useState<Verdict>(null);
@@ -303,7 +307,7 @@ export default function IssuePage() {
                       <Select
                         style={{ height: TOUCH }}
                         placeholder="選機台"
-                        options={MACHINES.map((m) => ({ value: m, label: m }))}
+                        options={machines.map((m) => ({ value: m, label: m }))}
                       />
                     </Form.Item>
                   </Col>
@@ -313,7 +317,7 @@ export default function IssuePage() {
                         style={{ height: TOUCH }}
                         allowClear
                         placeholder="事後補"
-                        options={PRODUCTS.map((p) => ({ value: p, label: p }))}
+                        options={products.map((p) => ({ value: p, label: p }))}
                       />
                     </Form.Item>
                   </Col>

@@ -22,13 +22,14 @@
 
 import { ArrowRightOutlined, PlusOutlined } from "@ant-design/icons";
 import {
-  Alert, AutoComplete, Button, Card, Checkbox, Col, DatePicker, Divider, Empty, Form, Input,
-  InputNumber, Radio, Row, Segmented, Table, Tag, Typography, message,
+  Alert, Button, Card, Checkbox, Col, DatePicker, Divider, Empty, Form, Input,
+  InputNumber, Radio, Row, Segmented, Space, Table, Tag, Typography, message,
 } from "antd";
 import dayjs from "dayjs";
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
-import { api, type Item, type Lot } from "@/lib/api";
+import CreatableSelect from "@/components/CreatableSelect";
+import { api, type Dictionary, type Item, type Lot } from "@/lib/api";
 
 const { Title, Text } = Typography;
 
@@ -40,7 +41,9 @@ const INSPECTION = ["規格尺寸", "標示製造日期", "標示有效日期", 
 export default function ReceivingPage() {
   const [items, setItems] = useState<Item[]>([]);
   const [lots, setLots] = useState<Lot[]>([]);
+  const [dict, setDict] = useState<Dictionary | null>(null);
   const [busy, setBusy] = useState(false);
+  const [enteredCount, setEnteredCount] = useState(0);
   const [knownCode, setKnownCode] = useState(false);
   // Metres is the default: the acceptance form records quantity in metres, so
   // boxes is the exception here, not the norm.
@@ -63,9 +66,10 @@ export default function ReceivingPage() {
 
   const load = useCallback(async () => {
     try {
-      const [i, l] = await Promise.all([api.items(), api.lots()]);
+      const [i, l, d] = await Promise.all([api.items(), api.lots(), api.dictionary()]);
       setItems(i);
       setLots(l);
+      setDict(d);
     } catch (e) {
       message.error((e as Error).message);
     }
@@ -73,11 +77,17 @@ export default function ReceivingPage() {
 
   useEffect(() => { load(); }, [load]);
 
-  // Suggestions rather than a supplier master: one factory, a handful of names.
-  // A second real factory is what would justify the extra table.
-  const suppliers = Array.from(
-    new Set([...items.map((i) => i.supplier), ...lots.map((l) => l.supplier)].filter(Boolean) as string[]),
-  );
+  // Options come from the dictionary (基本資料), not from whatever happens to be
+  // in past records — otherwise a first-ever supplier is unselectable and a
+  // typo becomes a permanent option.
+  const dictValues = (category: string) =>
+    (dict?.entries[category] ?? []).filter((e) => e.active).map((e) => e.value);
+
+  const suppliers = dictValues("supplier");
+  const materialNames = dictValues("material_name");
+  const specs = dictValues("spec");
+  const signers = dictValues("staff");
+  const byCode = new Map(items.map((i) => [i.item_code, i]));
 
   function onCodeChange(value: string) {
     const found = items.find((i) => i.item_code === value.trim());
@@ -133,10 +143,20 @@ export default function ReceivingPage() {
       if (res.same_signer) {
         message.warning("記錄人與確認人是同一個人 —— 雙簽的意義就是兩個人，請確認。", 8);
       }
-      if (res.same_day_lot_exists) {
-        message.warning("同料號同進貨日已有另一批，這次另開一批。要合併請自行調整。", 6);
+      if (res.duplicate_lot_exists) {
+        message.warning("同型號、同進貨日、同製造日已有一批 —— 確認不是重複登錄。", 8);
       }
-      form.resetFields();
+      setEnteredCount((n) => n + 1);
+      // Continuous entry: the header fields (進貨日期 / 廠商 / 簽核人) repeat down
+      // the sheet — on paper they are literally written as 〃. Clearing them
+      // every line would make transcribing one delivery of five batches five
+      // times the typing.
+      form.resetFields([
+        "item_code", "item_name", "spec", "qty", "qty_meters",
+        "manufacture_date", "expiry_date", "supplier_lot_code",
+        "inspection", "verdict", "remark", "meters_per_box", "supplier_code",
+        "shelf_life_days", "safety_stock",
+      ]);
       setKnownCode(false);
       load();
     } catch (e) {
@@ -150,7 +170,27 @@ export default function ReceivingPage() {
     <>
       <Title level={3} style={{ marginTop: 0 }}>收貨建批</Title>
 
-      <Card title="登錄一批到貨">
+      <Card
+        title="登錄一批到貨"
+        extra={
+          enteredCount > 0 ? (
+            <Space>
+              <Text type="secondary">本次已登錄 {enteredCount} 批</Text>
+              <Button
+                size="small"
+                onClick={() => {
+                  form.resetFields();
+                  form.setFieldsValue({ qty: 1, receipt_date: dayjs(), safety_stock: 0 });
+                  setEnteredCount(0);
+                  setKnownCode(false);
+                }}
+              >
+                清空重填
+              </Button>
+            </Space>
+          ) : null
+        }
+      >
         <Form
           form={form}
           layout="vertical"
@@ -162,17 +202,18 @@ export default function ReceivingPage() {
                 name="receipt_date"
                 label="進貨日期"
                 rules={[{ required: true, message: "請填進貨日期" }]}
-                extra="FIFO 就是照這個排序"
+                extra={enteredCount > 0 ? "沿用上一批（單上的〃）" : "FIFO 就是照這個排序"}
               >
                 <DatePicker style={{ width: "100%" }} disabledDate={(d) => d.isAfter(dayjs(), "day")} />
               </Form.Item>
             </Col>
             <Col xs={24} md={6}>
-              <Form.Item name="supplier" label="廠商名稱">
-                <AutoComplete
-                  options={suppliers.map((v) => ({ value: v }))}
-                  placeholder="例 臺灣希悅爾"
-                />
+              <Form.Item
+                name="supplier"
+                label="廠商名稱"
+                extra={enteredCount > 0 ? "沿用上一批" : undefined}
+              >
+                <CreatableSelect options={suppliers} placeholder="選廠商" addLabel="新增廠商" category="supplier" onAdded={load} />
               </Form.Item>
             </Col>
             <Col xs={24} md={6}>
@@ -181,7 +222,13 @@ export default function ReceivingPage() {
                 label="原物料名稱"
                 rules={[{ required: !knownCode, message: "新型號請填原物料名稱" }]}
               >
-                <Input placeholder="例 高阻氧食品包裝拉伸膜" />
+                <CreatableSelect
+                  options={materialNames}
+                  placeholder="選原物料名稱"
+                  addLabel="新增名稱"
+                  category="material_name"
+                  onAdded={load}
+                />
               </Form.Item>
             </Col>
             <Col xs={24} md={6}>
@@ -191,16 +238,16 @@ export default function ReceivingPage() {
                 rules={[{ required: true, message: "請填型號" }]}
                 extra="可直接打新型號，系統會一併建品項"
               >
-                <AutoComplete
-                  options={items.map((i) => ({
-                    value: i.item_code,
-                    label: `${i.item_code}｜${i.name}${i.meters_per_box ? `（每箱 ${i.meters_per_box} 米）` : ""}`,
-                  }))}
-                  filterOption={(input, option) =>
-                    String(option?.value ?? "").toLowerCase().includes(input.toLowerCase())
-                  }
+                <CreatableSelect
+                  options={items.map((i) => i.item_code)}
+                  describe={(code) => {
+                    const item = byCode.get(code);
+                    if (!item) return code;
+                    return `${code}｜${item.name}${item.meters_per_box ? `（每箱 ${item.meters_per_box} 米）` : ""}`;
+                  }}
                   onChange={onCodeChange}
-                  placeholder="例 T6050BSW"
+                  placeholder="選型號"
+                  addLabel="新增型號"
                 />
               </Form.Item>
             </Col>
@@ -237,22 +284,22 @@ export default function ReceivingPage() {
               >
                 {qtyMode === "箱" ? (
                   <Form.Item name="qty" rules={[{ required: true, message: "請填數量" }]} noStyle>
-                    <InputNumber min={1} style={{ width: "100%" }} addonAfter="箱" />
+                    <InputNumber min={1} style={{ width: "100%" }} />
                   </Form.Item>
                 ) : (
                   <Form.Item name="qty_meters" rules={[{ required: true, message: "請填米數" }]} noStyle>
-                    <InputNumber min={1} step={100} style={{ width: "100%" }} addonAfter="米" />
+                    <InputNumber min={1} step={100} style={{ width: "100%" }} />
                   </Form.Item>
                 )}
               </Form.Item>
             </Col>
             <Col xs={24} md={6}>
               <Form.Item name="spec" label="規格">
-                <Input placeholder="例 340mm x 900M" />
+                <CreatableSelect options={specs} placeholder="選規格" addLabel="新增規格" category="spec" onAdded={load} />
               </Form.Item>
             </Col>
             <Col xs={24} md={6}>
-              <Form.Item name="manufacture_date" label="標示（製造日期）">
+              <Form.Item name="manufacture_date" label="標示（製造日期）" extra="一次到貨含多個製造日 → 分批登錄，一個製造日一批">
                 <DatePicker style={{ width: "100%" }} />
               </Form.Item>
             </Col>
@@ -272,7 +319,7 @@ export default function ReceivingPage() {
             </Col>
           </Row>
 
-          <Divider orientation="left" plain>
+          <Divider titlePlacement="left" plain>
             <Text type="secondary">檢驗項目</Text>
           </Divider>
           <Row gutter={24}>
@@ -307,7 +354,7 @@ export default function ReceivingPage() {
           <Row gutter={24}>
             <Col xs={24} md={6}>
               <Form.Item name="recorded_by" label="記錄人">
-                <Input placeholder="填單的人" />
+                <CreatableSelect options={signers} placeholder="選填單的人" addLabel="新增人員" category="staff" onAdded={load} />
               </Form.Item>
             </Col>
             <Col xs={24} md={6}>
@@ -317,12 +364,12 @@ export default function ReceivingPage() {
                 validateStatus={sameSigner ? "warning" : undefined}
                 help={sameSigner ? "跟記錄人同一個人" : undefined}
               >
-                <Input placeholder="覆核的人" />
+                <CreatableSelect options={signers} placeholder="選覆核的人" addLabel="新增人員" category="staff" onAdded={load} />
               </Form.Item>
             </Col>
           </Row>
 
-          <Divider orientation="left" plain>
+          <Divider titlePlacement="left" plain>
             <Text type="secondary">品項設定（影響提醒門檻）</Text>
           </Divider>
           <Row gutter={24}>
@@ -339,10 +386,10 @@ export default function ReceivingPage() {
             <Col xs={24} md={6}>
               <Form.Item
                 name="meters_per_box"
-                label="每箱米數"
+                label="每箱米數（米）"
                 extra="設了才能用米數收貨；留空代表此品項只用箱計"
               >
-                <InputNumber min={1} step={100} style={{ width: "100%" }} addonAfter="米" placeholder="例 600" />
+                <InputNumber min={1} step={100} style={{ width: "100%" }} placeholder="例 600" />
               </Form.Item>
             </Col>
             <Col xs={24} md={6}>
