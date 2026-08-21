@@ -38,7 +38,7 @@ export default function AlertsPage() {
           <Col xs={12} md={6}><Statistic title="效期將屆" value={data.expiring.length} suffix="批" /></Col>
           <Col xs={12} md={6}><Statistic title="呆滯批次" value={data.stale.length} suffix="批" /></Col>
           <Col xs={12} md={6}><Statistic title="低於安全水位" value={data.low_stock.length} suffix="項" /></Col>
-          <Col xs={12} md={6}><Statistic title="包裝產品待補" value={data.pending_detail.length} suffix="筆" /></Col>
+          <Col xs={12} md={6}><Statistic title="產品名稱待補" value={data.pending_detail.length} suffix="筆" /></Col>
           <Col xs={12} md={6}>
             <Statistic
               title="驗收不合格待處理"
@@ -142,7 +142,7 @@ export default function AlertsPage() {
         />
       </Card>
 
-      <Card title="包裝產品待補" style={{ marginTop: 24 }}>
+      <Card title="產品名稱待補" style={{ marginTop: 24 }}>
         <Table
           rowKey="id"
           size="middle"

@@ -105,7 +105,7 @@ export default function IssuePage() {
         ocr_notes: proposal.recognition.notes,
         match_distance: proposal.match_distance,
         fields,
-        detail_pending: !fields["包裝產品"],
+        detail_pending: !fields["產品名稱"],
       });
       setVerdict({ status: res.status, id: res.id, expected: res.fifo_expected_date });
     } catch (e) {
@@ -312,7 +312,7 @@ export default function IssuePage() {
                     </Form.Item>
                   </Col>
                   <Col xs={24} md={6}>
-                    <Form.Item name="包裝產品" label="包裝產品" extra="現在不知道可以先跳過，事後補">
+                    <Form.Item name="產品名稱" label="產品名稱" extra="現在不知道可以先跳過，事後補">
                       <Select
                         style={{ height: TOUCH }}
                         allowClear

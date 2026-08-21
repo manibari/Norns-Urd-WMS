@@ -81,12 +81,23 @@ CREATE TABLE IF NOT EXISTS material_usage_scan (
     created_at           TEXT NOT NULL
 );
 
+-- 角色顯示名稱. 角色「能做什麼」是系統設計(auth.PERMISSIONS, 寫在程式裡),
+-- 角色「叫什麼」是各廠用語, 所以只有 label 進 DB.
+CREATE TABLE IF NOT EXISTS app_role (
+    code       TEXT PRIMARY KEY,   -- user | manager | admin
+    label      TEXT NOT NULL,
+    sort_order INTEGER NOT NULL DEFAULT 0
+);
+
 -- 使用者與角色.
 CREATE TABLE IF NOT EXISTS app_user (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     username      TEXT NOT NULL UNIQUE,   -- 登入帳號
     name          TEXT NOT NULL,          -- 顯示名/簽核名, 會寫進紀錄人與稽核軌跡
-    role          TEXT NOT NULL,          -- operator | warehouse | supervisor | admin
+    -- 職位: 給人看的職稱 (倉管/廠長/品管/包裝線作業員). 與權限無關 —— 兩個職位
+    -- 可以是同一個 role, 這正是把它們分開的理由.
+    title         TEXT,
+    role          TEXT NOT NULL,          -- user | manager | admin (權限層級)
     password_hash TEXT NOT NULL,
     active        INTEGER NOT NULL DEFAULT 1,
     must_change   INTEGER NOT NULL DEFAULT 0,  -- 管理者重設密碼後強制更改
@@ -164,6 +175,7 @@ _ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("inventory_lot", "recorded_by", "recorded_by TEXT"),
     ("inventory_lot", "confirmed_by", "confirmed_by TEXT"),
     ("inventory_lot", "remark", "remark TEXT"),
+    ("app_user", "title", "title TEXT"),
 )
 
 

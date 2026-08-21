@@ -204,7 +204,9 @@ export function UserBadge() {
       <Space orientation="vertical" size={0} style={{ lineHeight: 1.3, cursor: "pointer" }}
              onClick={openPasswordChange}>
         <Text style={{ color: "#fff" }}>{user.name}</Text>
-        <Text style={{ color: "#8c8c8c", fontSize: 12 }}>{user.role_label}</Text>
+        {/* The job title, not the permission tier — "倉管" is what someone
+            recognises themselves as; "manager" is a server-side concept. */}
+        <Text style={{ color: "#8c8c8c", fontSize: 12 }}>{user.title ?? user.role_label}</Text>
       </Space>
       <Button type="text" icon={<LogoutOutlined />} style={{ color: "#8c8c8c" }} onClick={logout} />
     </Space>

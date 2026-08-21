@@ -35,17 +35,28 @@ export default function BasicsPage() {
   const [items, setItems] = useState<Item[]>([]);
   const [dict, setDict] = useState<Dictionary | null>(null);
   const [users, setUsers] = useState<ManagedUser[]>([]);
+  const [roles, setRoles] = useState<{ code: string; label: string; default_label: string }[]>([]);
+  // 廠商 / 原物料名稱 / 規格 are attributes of a 型號, so their options are the
+  // distinct values already on the item master — not a separate table that
+  // could disagree with it.
+  const [options, setOptions] = useState<{ supplier: string[]; material_name: string[]; spec: string[] }>(
+    { supplier: [], material_name: [], spec: [] },
+  );
   const [editing, setEditing] = useState<Item | "new" | null>(null);
   const [busy, setBusy] = useState(false);
   const [form] = Form.useForm();
   const { can, user: me } = useAuth();
 
   const load = useCallback(async () => {
-    const [i, d] = await Promise.allSettled([api.items(), api.dictionary(true)]);
+    const [i, d, o, r] = await Promise.allSettled([
+      api.items(), api.dictionary(true), api.itemOptions(), api.roles(),
+    ]);
     if (i.status === "fulfilled") setItems(i.value);
     else message.error(`型號載入失敗：${i.reason?.message}`);
     if (d.status === "fulfilled") setDict(d.value);
-    else message.error(`字典載入失敗：${d.reason?.message}`);
+    else message.error(`選項載入失敗：${d.reason?.message}`);
+    if (o.status === "fulfilled") setOptions(o.value);
+    if (r.status === "fulfilled") setRoles(r.value);
     if (can("user.manage")) {
       try {
         setUsers(await api.users());
@@ -56,9 +67,6 @@ export default function BasicsPage() {
   }, [can]);
 
   useEffect(() => { load(); }, [load]);
-
-  const dictValues = (category: string) =>
-    (dict?.entries[category] ?? []).filter((e) => e.active).map((e) => e.value);
 
   async function saveItem() {
     const values = await form.validateFields().catch(() => null);
@@ -99,7 +107,7 @@ export default function BasicsPage() {
       <Alert
         type="info"
         title="一個型號就是「某廠商的某原物料的某規格」"
-        description="所以收貨時只選型號，廠商／原物料名稱／規格會自動帶出，不用也不該分開選。米數是換算用的：驗收單數量填米，這張表把它換成箱；庫存記帳仍以箱為單位，一箱＝一捲，不做部分扣量。"
+        description="所以廠商／原物料名稱／規格沒有各自的清單 —— 它們是這張表的欄位，要改就點那一列的「編輯」。收貨時只選型號，這三欄會自動帶出。米數是換算用的：驗收單數量填米，這張表換成箱；庫存記帳仍以箱為單位，一箱＝一捲，不做部分扣量。"
         style={{ marginBottom: 24 }}
       />
 
@@ -196,7 +204,13 @@ export default function BasicsPage() {
   );
 
   const usersTab = (
-    <UsersPanel users={users} me={me} onChanged={load} />
+    <UsersPanel
+      users={users}
+      me={me}
+      roles={roles}
+      jobTitles={(dict?.entries.job_title ?? []).filter((e) => e.active).map((e) => e.value)}
+      onChanged={load}
+    />
   );
 
   return (
@@ -221,7 +235,7 @@ export default function BasicsPage() {
               };
             }),
             ...(can("user.manage")
-              ? [{ key: "users", label: `人員與權限（${users.filter((u) => u.active).length}）`, children: usersTab }]
+              ? [{ key: "users", label: `人員（${users.filter((u) => u.active).length}）`, children: usersTab }]
               : []),
           ]}
         />
@@ -248,22 +262,22 @@ export default function BasicsPage() {
             </Col>
             <Col span={8}>
               <Form.Item name="name" label="原物料名稱" rules={[{ required: true, message: "請填名稱" }]}>
-                <CreatableSelect options={dictValues("material_name")} placeholder="選名稱"
-                                 category="material_name" onAdded={load} addLabel="新增名稱" />
+                <CreatableSelect options={options.material_name} placeholder="選或直接輸入"
+                                 addLabel="新增名稱" />
               </Form.Item>
             </Col>
             <Col span={8}>
               <Form.Item name="spec" label="規格">
-                <CreatableSelect options={dictValues("spec")} placeholder="選規格"
-                                 category="spec" onAdded={load} addLabel="新增規格" />
+                <CreatableSelect options={options.spec} placeholder="選或直接輸入"
+                                 addLabel="新增規格" />
               </Form.Item>
             </Col>
           </Row>
           <Row gutter={16}>
             <Col span={8}>
               <Form.Item name="supplier" label="廠商">
-                <CreatableSelect options={dictValues("supplier")} placeholder="選廠商"
-                                 category="supplier" onAdded={load} addLabel="新增廠商" />
+                <CreatableSelect options={options.supplier} placeholder="選或直接輸入"
+                                 addLabel="新增廠商" />
               </Form.Item>
             </Col>
             <Col span={16}>
@@ -299,19 +313,38 @@ export default function BasicsPage() {
 }
 
 function UsersPanel({
-  users, me, onChanged,
-}: { users: ManagedUser[]; me: SessionUser | null; onChanged: () => void }) {
+  users, me, roles, jobTitles, onChanged,
+}: {
+  users: ManagedUser[];
+  me: SessionUser | null;
+  roles: { code: string; label: string; default_label: string }[];
+  jobTitles: string[];
+  onChanged: () => void;
+}) {
   const [adding, setAdding] = useState(false);
   const [resetting, setResetting] = useState<ManagedUser | null>(null);
   const [form] = Form.useForm();
   const [pinForm] = Form.useForm();
 
-  const ROLES = [
-    { value: "operator", label: "包裝線作業員 — 只能領用登錄" },
-    { value: "warehouse", label: "倉管 — 收貨建批、維護型號" },
-    { value: "supervisor", label: "廠長／品管主管 — 加上覆核放行、看軌跡" },
-    { value: "admin", label: "系統管理者 — 全部，含編輯刪除批次" },
-  ];
+  // What a role may do is system design and not editable here; what it is
+  // called is the factory's vocabulary — 倉管 vs 資材 vs 物管 is a naming
+  // difference, not a different set of permissions.
+  const SCOPE: Record<string, string> = {
+    user: "領用登錄、補明細",
+    manager: "加上收貨建批、維護型號、覆核放行、看日誌",
+    admin: "加上批次修正與刪除、選項、人員與角色",
+  };
+  const ROLES = roles.map((r) => ({ value: r.code, label: `${r.label} — ${SCOPE[r.code] ?? ""}` }));
+
+  async function renameRole(code: string, label: string) {
+    try {
+      await api.patchRole(code, label);
+      message.success("角色名稱已更改");
+      onChanged();
+    } catch (e) {
+      message.error((e as Error).message);
+    }
+  }
 
   async function create() {
     const values = await form.validateFields().catch(() => null);
@@ -347,6 +380,25 @@ function UsersPanel({
 
   return (
     <>
+      <Card size="small" title="權限層級" style={{ marginBottom: 24 }}>
+        <Text type="secondary" style={{ display: "block", marginBottom: 12 }}>
+          三層權限的顯示名稱。<strong>這不是職位</strong> —— 職位（倉管／廠長／品管）填在下面每個人身上，
+          兩個不同職位可以是同一個權限層級。
+        </Text>
+        <Row gutter={16}>
+          {roles.map((r) => (
+            <Col xs={24} md={8} key={r.code}>
+              <Text type="secondary" style={{ fontSize: 12 }}>{SCOPE[r.code]}</Text>
+              <Input
+                defaultValue={r.label}
+                onBlur={(e) => e.target.value.trim() && e.target.value !== r.label
+                  && renameRole(r.code, e.target.value)}
+              />
+            </Col>
+          ))}
+        </Row>
+      </Card>
+
       <Space style={{ marginBottom: 16 }}>
         <Button type="primary" icon={<PlusOutlined />} onClick={() => setAdding(true)}>新增人員</Button>
         <Text type="secondary">改角色或停用會立即讓對方的登入失效，不會等到 12 小時後過期</Text>
@@ -357,13 +409,29 @@ function UsersPanel({
         size="middle"
         pagination={false}
         dataSource={users}
+        scroll={{ x: 1020 }}
         columns={[
-          { title: "帳號", dataIndex: "username", width: 120,
-            render: (v: string) => <Text code>{v}</Text> },
-          { title: "顯示名", dataIndex: "name", width: 130,
-            render: (v: string) => <Text strong>{v}</Text> },
+          { title: "帳號", dataIndex: "username", width: 110,
+            render: (v: string) => <Text code style={{ whiteSpace: "nowrap" }}>{v}</Text> },
+          { title: "顯示名", dataIndex: "name", width: 100,
+            render: (v: string) => <Text strong style={{ whiteSpace: "nowrap" }}>{v}</Text> },
           {
-            title: "角色", dataIndex: "role", width: 320,
+            title: "職位", dataIndex: "title", width: 180,
+            render: (v: string | null, row) => (
+              <CreatableSelect
+                value={v ?? undefined}
+                options={jobTitles}
+                placeholder="未設定"
+                addLabel="新增職位"
+                category="job_title"
+                style={{ width: 160 }}
+                onAdded={onChanged}
+                onChange={(next) => patch(row, { title: next })}
+              />
+            ),
+          },
+          {
+            title: "權限層級", dataIndex: "role", width: 300,
             render: (v: string, row) => (
               <Select
                 value={v}
@@ -374,7 +442,7 @@ function UsersPanel({
             ),
           },
           {
-            title: "狀態", dataIndex: "active", width: 140,
+            title: "狀態", dataIndex: "active", width: 170,
             render: (active: number, row) => (
               <Space>
                 <Switch
@@ -414,8 +482,19 @@ function UsersPanel({
           >
             <Input placeholder="例 郭" />
           </Form.Item>
-          <Form.Item name="role" label="角色" rules={[{ required: true, message: "請選角色" }]}>
-            <Select options={ROLES} placeholder="選角色" />
+          <Form.Item
+            name="title" label="職位"
+            extra="給人看的職稱（倉管／廠長／作業員），跟權限無關"
+          >
+            <CreatableSelect options={jobTitles} placeholder="選職位" addLabel="新增職位"
+                             category="job_title" onAdded={onChanged} />
+          </Form.Item>
+          <Form.Item
+            name="role" label="權限層級"
+            rules={[{ required: true, message: "請選權限層級" }]}
+            extra="決定他能做什麼。兩個不同職位可以是同一個層級"
+          >
+            <Select options={ROLES} placeholder="選層級" />
           </Form.Item>
           <Form.Item
             name="password" label="初始密碼"

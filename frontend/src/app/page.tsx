@@ -44,11 +44,14 @@ export default function ReceivingPage() {
   const [items, setItems] = useState<Item[]>([]);
   const [lots, setLots] = useState<Lot[]>([]);
   const [dict, setDict] = useState<Dictionary | null>(null);
+  const [options, setOptions] = useState<{ supplier: string[]; material_name: string[]; spec: string[] }>(
+    { supplier: [], material_name: [], spec: [] },
+  );
   const [busy, setBusy] = useState(false);
   const [enteredCount, setEnteredCount] = useState(0);
   const [editing, setEditing] = useState<Lot | null>(null);
   const { user, can } = useAuth();
-  const [roster, setRoster] = useState<{ name: string; role_label: string }[]>([]);
+  const [roster, setRoster] = useState<{ name: string; title: string | null; role_label: string }[]>([]);
   useEffect(() => {
     api.signers().then(setRoster).catch(() => undefined);
   }, []);
@@ -75,26 +78,27 @@ export default function ReceivingPage() {
   const load = useCallback(async () => {
     // Settled, not all: a single failing endpoint must not blank the page into
     // looking like an empty warehouse.
-    const [i, l, d] = await Promise.allSettled([api.items(), api.lots(), api.dictionary()]);
+    const [i, l, d, o] = await Promise.allSettled([
+      api.items(), api.lots(), api.dictionary(), api.itemOptions(),
+    ]);
     if (i.status === "fulfilled") setItems(i.value);
     else message.error(`品項載入失敗：${i.reason?.message ?? i.reason}`);
     if (l.status === "fulfilled") setLots(l.value);
     else message.error(`批次載入失敗：${l.reason?.message ?? l.reason}`);
     if (d.status === "fulfilled") setDict(d.value);
     else message.error(`選項載入失敗：${d.reason?.message ?? d.reason}`);
+    if (o.status === "fulfilled") setOptions(o.value);
   }, []);
 
   useEffect(() => { load(); }, [load]);
 
-  // Options come from the dictionary (基本資料), not from whatever happens to be
-  // in past records — otherwise a first-ever supplier is unselectable and a
-  // typo becomes a permanent option.
-  const dictValues = (category: string) =>
-    (dict?.entries[category] ?? []).filter((e) => e.active).map((e) => e.value);
-
-  const suppliers = dictValues("supplier");
-  const materialNames = dictValues("material_name");
-  const specs = dictValues("spec");
+  // 廠商 / 原物料名稱 / 規格 are attributes of a 型號, so their suggestions are
+  // the distinct values already on the item master. A separate dictionary would
+  // be the same facts stored twice, free to drift apart. Only needed while
+  // defining a NEW 型號 — for a known one these fields are read-only.
+  const suppliers = options.supplier;
+  const materialNames = options.material_name;
+  const specs = options.spec;
   const byCode = new Map(items.map((i) => [i.item_code, i]));
 
   // A 型號 IS a supplier's material at a spec — T7320BC is 臺灣希悅爾's
@@ -271,7 +275,7 @@ export default function ReceivingPage() {
                   <Input disabled />
                 ) : (
                   <CreatableSelect options={suppliers} placeholder="選廠商" addLabel="新增廠商"
-                                   category="supplier" onAdded={load} />
+                                   />
                 )}
               </Form.Item>
             </Col>
@@ -286,7 +290,7 @@ export default function ReceivingPage() {
                   <Input disabled />
                 ) : (
                   <CreatableSelect options={materialNames} placeholder="選原物料名稱"
-                                   addLabel="新增名稱" category="material_name" onAdded={load} />
+                                   addLabel="新增名稱" />
                 )}
               </Form.Item>
             </Col>
@@ -358,7 +362,7 @@ export default function ReceivingPage() {
                   <Input disabled />
                 ) : (
                   <CreatableSelect options={specs} placeholder="選規格" addLabel="新增規格"
-                                   category="spec" onAdded={load} />
+                                   />
                 )}
               </Form.Item>
             </Col>
@@ -436,7 +440,7 @@ export default function ReceivingPage() {
                   placeholder="選覆核的人"
                   options={roster
                     .filter((r) => r.name !== user?.name)
-                    .map((r) => ({ value: r.name, label: `${r.name}（${r.role_label}）` }))}
+                    .map((r) => ({ value: r.name, label: `${r.name}（${r.title ?? r.role_label}）` }))}
                 />
               </Form.Item>
             </Col>
@@ -647,7 +651,7 @@ export default function ReceivingPage() {
           <Row gutter={16}>
             <Col span={8}>
               <Form.Item name="supplier" label="廠商名稱">
-                <CreatableSelect options={suppliers} placeholder="選廠商" category="supplier" onAdded={load} />
+                <CreatableSelect options={suppliers} placeholder="選廠商" />
               </Form.Item>
             </Col>
             <Col span={8}>

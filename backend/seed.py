@@ -51,31 +51,29 @@ INSPECTION_PASS = '{"規格尺寸": true, "標示製造日期": true, "標示有
 INSPECTION_FAIL = '{"規格尺寸": true, "標示製造日期": true, "標示有效日期": null, "外觀": false, "顏色": true}'
 
 
-# Seeds the dropdowns. Machines and products come off the paper form's notes
-# (「包裝機台編號：1號 D-003…」, 「肉乾類產品須填寫包裝產品（例如：經典、豬切…）」),
-# so they are this factory's configuration, not the product's.
+# Seeds the dropdowns that are not attributes of a 型號. Machines and products
+# come off the paper form's own notes (「包裝機台編號：1號 D-003…」,
+# 「肉乾類產品須填寫包裝產品（例如：經典、豬切…）」), so they are this factory's
+# configuration, not the product's.
+# Accounts covering the roles on the form: the person who writes the line, the
+# person who confirms it, the line operator, and someone to manage the rest.
+# Demo passwords — a real deployment sets these per person on first login.
+# Role is the permission tier; title is the job. 倉管 and 廠長 are different
+# jobs needing the same permissions, which is exactly why they are separate.
+USERS = [
+    # 帳號, 顯示名(簽核用), 職位, 角色, 密碼
+    ("kuo", "郭", "倉管", "manager", "urdwms2026"),
+    ("huang", "黃揚文", "廠長", "manager", "urdwms2026"),
+    ("operator", "線上作業員", "包裝線作業員", "user", "urdwms2026"),
+    ("peter", "Peter", "資訊", "admin", "peter0821"),
+]
+
 DICTIONARY = {
-    "supplier": ["臺灣希悅爾", "弘東京", "益壽"],
-    "material_name": ["高阻氧食品包裝拉伸膜", "食品包裝拉伸膜", "真空切片休閒下膜",
-                      "大包裝肉乾上膜", "大包裝肉乾下膜", "休閒豬上膜", "脫氧劑"],
-    "spec": ["340mm x 900M", "334mm x 600M", "300mm x 600M", "40x75x280mm"],
-    "staff": ["郭", "黃揚文", "黃海山"],
+    "job_title": ["倉管", "廠長", "品管", "線長", "包裝線作業員", "資訊"],
     "machine": ["D-003", "D-004", "D-023", "D-027"],
     "packed_product": ["經典", "豬切", "牛切", "休閒豬", "金尊", "海香", "魚絲", "雞脆", "豬脆", "香酥"],
     "override_reason": ["試產指定批", "舊批破損不可用", "規格臨時變更", "急單", "其他"],
 }
-
-
-# Four accounts covering the roles on the form: the person who writes the line,
-# the person who confirms it, the line operator, and someone to manage the rest.
-# Demo passwords — a real deployment sets these per person on first login.
-USERS = [
-    # 帳號, 顯示名(簽核用), 角色, 密碼
-    ("kuo", "郭", "warehouse", "urdwms2026"),
-    ("huang", "黃揚文", "supervisor", "urdwms2026"),
-    ("operator", "線上作業員", "operator", "urdwms2026"),
-    ("peter", "Peter", "admin", "peter0821"),
-]
 
 
 def main() -> int:
@@ -100,12 +98,15 @@ def main() -> int:
                 (code, receipt.isoformat(), manufacture, expiry, roll, "臺灣希悅爾", entered, unit,
                  INSPECTION_PASS if verdict == "合格" else INSPECTION_FAIL, verdict,
                  "郭", "黃揚文", remark, qty, now()))
-        from app.auth import hash_password
-        for username, name, role, password in USERS:
+        from app.auth import DEFAULT_ROLE_LABELS, hash_password
+        for order, (code, label) in enumerate(DEFAULT_ROLE_LABELS.items()):
+            conn.execute("INSERT OR IGNORE INTO app_role (code, label, sort_order) VALUES (?,?,?)",
+                         (code, label, order))
+        for username, name, title, role, password in USERS:
             conn.execute(
-                "INSERT OR IGNORE INTO app_user (username, name, role, password_hash, created_at)"
-                " VALUES (?,?,?,?,?)",
-                (username, name, role, hash_password(password), now()))
+                "INSERT OR IGNORE INTO app_user (username, name, title, role, password_hash, created_at)"
+                " VALUES (?,?,?,?,?,?)",
+                (username, name, title, role, hash_password(password), now()))
 
         for category, values in DICTIONARY.items():
             for order, value in enumerate(values):
@@ -115,8 +116,8 @@ def main() -> int:
         log(conn, "seed", "seed.run", {"items": len(ITEMS), "lots": len(LOTS), "users": len(USERS),
                                        "dictionary": sum(len(v) for v in DICTIONARY.values())})
     print(f"seeded {len(ITEMS)} items, {len(LOTS)} lots, {len(USERS)} users")
-    print("  登入帳號：" + "、".join(f"{u}（{n}）" for u, n, _, _ in USERS))
-    print(f"  demo 密碼：{USERS[0][3]}")
+    print("  登入帳號：" + "、".join(f"{u}（{n}·{t}·{r}）" for u, n, t, r, _ in USERS))
+    print(f"  demo 密碼：{USERS[0][4]}")
     return 0
 
 

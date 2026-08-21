@@ -141,6 +141,8 @@ export type SessionUser = {
   name: string;
   role: string;
   role_label: string;
+  /** 職位（倉管／廠長／作業員…）。給人看的，跟權限無關 */
+  title: string | null;
   must_change: boolean;
   permissions: string[];
 };
@@ -184,7 +186,7 @@ const json = (body: unknown): RequestInit => ({
 });
 
 export const api = {
-  signers: () => req<{ name: string; role_label: string }[]>("/api/auth/signers"),
+  signers: () => req<{ name: string; title: string | null; role_label: string }[]>("/api/auth/signers"),
   login: (username: string, password: string) =>
     req<{ token: string; expires_at: string; user: SessionUser }>(
       "/api/auth/login", json({ username, password })),
@@ -235,6 +237,14 @@ export const api = {
   override: (id: number, reason: string) =>
     req<{ id: number; status: string }>(`/api/scans/${id}/override`, json({ reason })),
   alerts: () => req<Alerts>("/api/alerts"),
+  itemOptions: () => req<{ supplier: string[]; material_name: string[]; spec: string[] }>("/api/item-options"),
+  roles: () => req<{ code: string; label: string; default_label: string; permissions: string[] }[]>("/api/roles"),
+  patchRole: (code: string, label: string) =>
+    req<{ code: string; label: string }>(`/api/roles/${code}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ label }),
+    }),
   createItem: (body: Record<string, unknown>) => req<Record<string, unknown>>("/api/items", json(body)),
   deleteItem: (code: string) =>
     req<{ item_code: string; deleted: boolean }>(`/api/items/${encodeURIComponent(code)}`, { method: "DELETE" }),

@@ -29,8 +29,8 @@ from urdwms_core.recognition import GeminiProvider, Recognition  # noqa: E402
 from urdwms_core.units import boxes_from_meters, meters_from_boxes  # noqa: E402
 
 from .auth import (  # noqa: E402
-    PERMISSIONS, ROLE_LABELS, check_password_policy, create_session, current_user,
-    hash_password, requires, verify_password,
+    DEFAULT_ROLE_LABELS, PERMISSIONS, check_password_policy, create_session, current_user,
+    hash_password, requires, role_label, role_labels, verify_password,
 )
 from .db import init_db, log, now, transaction  # noqa: E402
 
@@ -184,13 +184,15 @@ class LoginIn(BaseModel):
 class UserIn(BaseModel):
     username: str
     name: str
-    role: str
+    role: str                    # 權限層級 user | manager | admin
+    title: str | None = None     # 職位, 顯示用
     password: str
 
 
 class UserPatch(BaseModel):
     name: str | None = None
     role: str | None = None
+    title: str | None = None
     password: str | None = None
     active: bool | None = None
 
@@ -209,8 +211,11 @@ def signers(user: dict = Depends(current_user)) -> list[dict]:
     """
     with transaction() as conn:
         rows = conn.execute(
-            "SELECT name, role FROM app_user WHERE active = 1 ORDER BY role, name").fetchall()
-    return [{"name": r["name"], "role_label": ROLE_LABELS.get(r["role"], r["role"])} for r in rows]
+            "SELECT name, title, role FROM app_user WHERE active = 1 ORDER BY role, name").fetchall()
+    # Shows the job title, which is what people recognise each other by; the
+    # role is a permission tier and means nothing to whoever is signing.
+    return [{"name": r["name"], "title": r["title"], "role_label": role_label(r["role"])}
+            for r in rows]
 
 
 @app.post("/api/auth/login")
@@ -228,7 +233,7 @@ def login(payload: LoginIn) -> dict:
     return {
         "token": token, "expires_at": expires,
         "user": {"id": row["id"], "username": row["username"], "name": row["name"],
-                 "role": row["role"], "role_label": ROLE_LABELS.get(row["role"], row["role"]),
+                 "title": row["title"], "role": row["role"], "role_label": role_label(row["role"]),
                  "must_change": bool(row["must_change"]),
                  "permissions": sorted(PERMISSIONS.get(row["role"], set()))},
     }
@@ -263,15 +268,48 @@ def logout(authorization: str | None = Header(default=None)) -> dict:
 
 @app.get("/api/auth/me")
 def me(user: dict = Depends(current_user)) -> dict:
-    return {**user, "role_label": ROLE_LABELS.get(user["role"], user["role"])}
+    return {**user, "role_label": role_label(user["role"])}
+
+
+class RolePatch(BaseModel):
+    label: str
+
+
+@app.get("/api/roles")
+def roles(user: dict = Depends(current_user)) -> list[dict]:
+    labels = role_labels()
+    order = list(DEFAULT_ROLE_LABELS)
+    return [
+        {"code": code, "label": labels[code], "default_label": DEFAULT_ROLE_LABELS[code],
+         "permissions": sorted(PERMISSIONS.get(code, set()))}
+        for code in order
+    ]
+
+
+@app.patch("/api/roles/{code}")
+def update_role(code: str, payload: RolePatch,
+                user: dict = Depends(requires("user.manage"))) -> dict:
+    """Rename a role. The permissions behind it are not editable here — what a
+    role may do is system design; what it is called is the factory's words."""
+    if code not in PERMISSIONS:
+        raise HTTPException(404, f"未知的角色 {code}")
+    label = payload.label.strip()
+    if not label:
+        raise HTTPException(400, "名稱不可空白")
+    with transaction() as conn:
+        conn.execute(
+            "INSERT INTO app_role (code, label) VALUES (?, ?)"
+            " ON CONFLICT(code) DO UPDATE SET label = excluded.label", (code, label))
+        log(conn, user["name"], "role.rename", {"code": code, "label": label})
+    return {"code": code, "label": label}
 
 
 @app.get("/api/users")
 def users(user: dict = Depends(requires("user.manage"))) -> list[dict]:
     with transaction() as conn:
-        rows = conn.execute("SELECT id, username, name, role, active, must_change, created_at"
+        rows = conn.execute("SELECT id, username, name, title, role, active, must_change, created_at"
                             " FROM app_user ORDER BY role, name").fetchall()
-    return [{**dict(r), "role_label": ROLE_LABELS.get(r["role"], r["role"])} for r in rows]
+    return [{**dict(r), "role_label": role_label(r["role"])} for r in rows]
 
 
 @app.post("/api/users")
@@ -286,9 +324,10 @@ def create_user(payload: UserIn, user: dict = Depends(requires("user.manage"))) 
         if conn.execute("SELECT 1 FROM app_user WHERE username = ?", (username,)).fetchone():
             raise HTTPException(409, f"帳號「{username}」已存在")
         cursor = conn.execute(
-            "INSERT INTO app_user (username, name, role, password_hash, must_change, created_at)"
-            " VALUES (?,?,?,?,1,?)",
-            (username, payload.name.strip(), payload.role, hash_password(payload.password), now()))
+            "INSERT INTO app_user (username, name, title, role, password_hash, must_change, created_at)"
+            " VALUES (?,?,?,?,?,1,?)",
+            (username, payload.name.strip(), (payload.title or "").strip() or None,
+             payload.role, hash_password(payload.password), now()))
         # Created with a password someone else chose, so it must be changed on
         # first login — otherwise the admin knows everyone's password forever.
         log(conn, user["name"], "user.create", {"username": username, "role": payload.role})
@@ -305,6 +344,8 @@ def update_user(user_id: int, payload: UserPatch,
         changes["role"] = payload.role
     if payload.name is not None and payload.name.strip():
         changes["name"] = payload.name.strip()
+    if payload.title is not None:
+        changes["title"] = payload.title.strip() or None
     if payload.password is not None:
         check_password_policy(payload.password)
         changes["password_hash"] = hash_password(payload.password)
@@ -338,17 +379,21 @@ def update_user(user_id: int, payload: UserPatch,
 
 # --------------------------------------------------------------------------- dictionary
 
-# Every dropdown in the app is fed from here. Retiring a value deactivates it
-# rather than deleting it, because historical records reference it and a
-# traceability report that renders a blank where a machine used to be is worse
-# than one naming a machine that no longer exists.
+# Dropdowns that are NOT attributes of something else.
+#
+# 廠商 / 原物料名稱 / 規格 deliberately are not here: a 型號 already carries all
+# three, so a separate table would hold the same facts twice and let them drift
+# apart. Those dropdowns read distinct values off the item master instead.
+#
+# 人員 is likewise gone — signers are accounts now, not free-standing names.
+#
+# Retiring a value deactivates it rather than deleting it, because historical
+# records reference it, and a traceability report rendering a blank where a
+# machine used to be is worse than one naming a machine that no longer exists.
 DICTIONARY_CATEGORIES: dict[str, str] = {
-    "supplier": "廠商名稱",
-    "material_name": "原物料名稱",
-    "spec": "規格",
-    "staff": "人員（記錄人／確認人）",
+    "job_title": "職位名稱",
     "machine": "包裝機台",
-    "packed_product": "包裝產品",
+    "packed_product": "產品名稱",
     "override_reason": "非 FIFO 覆核原因",
 }
 
@@ -456,6 +501,26 @@ def items(user: dict = Depends(current_user)) -> list[dict]:
             " GROUP BY i.item_code ORDER BY i.item_code",
         ).fetchall()
     return [{**dict(r), "on_hand_m": meters_from_boxes(r["on_hand"], r["meters_per_box"])} for r in rows]
+
+
+@app.get("/api/item-options")
+def item_options(user: dict = Depends(current_user)) -> dict:
+    """Distinct 廠商 / 原物料名稱 / 規格 already in use, for the new-型號 form.
+
+    Derived rather than stored: these are attributes of a 型號, so the item
+    master is the only place they live. Keeping a parallel list would be two
+    copies of the same fact, free to disagree.
+    """
+    with transaction() as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT supplier, name, spec FROM inventory_item").fetchall()
+    def distinct(key: str) -> list[str]:
+        return sorted({r[key] for r in rows if r[key]})
+    return {
+        "supplier": distinct("supplier"),
+        "material_name": distinct("name"),
+        "spec": distinct("spec"),
+    }
 
 
 @app.patch("/api/items/{item_code:path}")

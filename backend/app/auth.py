@@ -21,24 +21,52 @@ from .db import now, transaction
 
 SESSION_HOURS = 12
 
-# What each role may do. Kept as data so a factory can be re-scoped without
-# hunting through endpoint bodies — the same reasoning as the dictionary tables.
+# Three permission tiers, each a superset of the one below.
+#
+# A role is NOT a job title. 倉管 and 廠長 are different jobs that both need the
+# same thing from the system — record deliveries, approve a non-FIFO draw — so
+# they are both `manager`. The job title lives on the user (`app_user.title`)
+# and is what screens show people; the role is what the server checks. Mixing
+# them means every new job title needs a new permission set, which is how an
+# access model turns into a mess.
 PERMISSIONS: dict[str, set[str]] = {
-    "operator": {"issue.create", "issue.detail"},
-    "warehouse": {"issue.create", "issue.detail", "lot.create", "item.manage"},
-    "supervisor": {"issue.create", "issue.detail", "lot.create", "item.manage",
-                   "scan.override", "audit.read"},
+    # 作業: 領用登錄與補明細
+    "user": {"issue.create", "issue.detail"},
+    # 管理: 加上收貨建批、維護型號、覆核放行、看日誌
+    "manager": {"issue.create", "issue.detail", "lot.create", "item.manage",
+                "scan.override", "audit.read"},
+    # 系統: 加上批次修正與刪除、選項、人員與角色
     "admin": {"issue.create", "issue.detail", "lot.create", "item.manage",
               "scan.override", "audit.read", "lot.edit", "lot.delete",
               "dictionary.manage", "user.manage"},
 }
 
-ROLE_LABELS = {
-    "operator": "包裝線作業員",
-    "warehouse": "倉管",
-    "supervisor": "廠長／品管主管",
+# Shipped defaults. The live labels come from app_role so each factory can use
+# its own words — 倉管 vs 資材 vs 物管 is a naming difference, not a different
+# set of permissions, and forcing our vocabulary on them makes the screen read
+# like someone else's system.
+DEFAULT_ROLE_LABELS = {
+    "user": "一般使用者",
+    "manager": "管理者",
     "admin": "系統管理者",
 }
+
+
+def role_labels() -> dict[str, str]:
+    """Current labels, falling back to the defaults for anything unset."""
+    labels = dict(DEFAULT_ROLE_LABELS)
+    try:
+        with transaction() as conn:
+            for row in conn.execute("SELECT code, label FROM app_role").fetchall():
+                if row["code"] in labels:
+                    labels[row["code"]] = row["label"]
+    except Exception:  # noqa: BLE001 — a missing table must not break login
+        pass
+    return labels
+
+
+def role_label(code: str) -> str:
+    return role_labels().get(code, code)
 
 MIN_PASSWORD_LENGTH = 8
 _ITERATIONS = 240_000
@@ -97,7 +125,7 @@ def current_user(authorization: str | None = Header(default=None)) -> dict:
         raise HTTPException(401, "請先登入")
     with transaction() as conn:
         row = conn.execute(
-            "SELECT s.expires_at, u.id, u.username, u.name, u.role, u.active, u.must_change"
+            "SELECT s.expires_at, u.id, u.username, u.name, u.role, u.title, u.active, u.must_change"
             " FROM app_session s JOIN app_user u ON u.id = s.user_id WHERE s.token = ?",
             (token,),
         ).fetchone()
@@ -109,7 +137,7 @@ def current_user(authorization: str | None = Header(default=None)) -> dict:
         if not row["active"]:
             raise HTTPException(403, "此帳號已停用")
     return {"id": row["id"], "username": row["username"], "name": row["name"],
-            "role": row["role"], "must_change": bool(row["must_change"]),
+            "role": row["role"], "title": row["title"], "must_change": bool(row["must_change"]),
             "permissions": sorted(PERMISSIONS.get(row["role"], set()))}
 
 
@@ -122,10 +150,11 @@ def requires(permission: str):
     """
     def dependency(user: dict = Depends(current_user)) -> dict:
         if permission not in user["permissions"]:
-            allowed = [ROLE_LABELS[r] for r, perms in PERMISSIONS.items() if permission in perms]
+            labels = role_labels()
+            allowed = [labels[r] for r, perms in PERMISSIONS.items() if permission in perms]
             raise HTTPException(
                 403,
-                f"你的身分（{ROLE_LABELS.get(user['role'], user['role'])}）不能做這件事。"
+                f"你的身分（{labels.get(user['role'], user['role'])}）不能做這件事。"
                 f" 需要：{'、'.join(allowed)}",
             )
         return user
