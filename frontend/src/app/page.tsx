@@ -56,14 +56,15 @@ export default function ReceivingPage() {
     api.signers().then(setRoster).catch(() => undefined);
   }, []);
   const [editForm] = Form.useForm();
-  const [knownCode, setKnownCode] = useState(false);
+  const [knownItem, setKnownItem] = useState(false);
   // Metres is the default: the acceptance form records quantity in metres, so
   // boxes is the exception here, not the norm.
   const [qtyMode, setQtyMode] = useState<"米" | "箱">("米");
   const [form] = Form.useForm();
   const rate = Form.useWatch("meters_per_box", form) as number | undefined;
   const metres = Form.useWatch("qty_meters", form) as number | undefined;
-  const chosenCode = (Form.useWatch("item_code", form) as string | undefined)?.trim();
+  const chosenItem = Form.useWatch("item_id", form) as number | undefined;
+  const chosenLabel = items.find((i) => i.id === chosenItem)?.label;
   const verdict = Form.useWatch("verdict", form) as string | undefined;
   const confirmedBy = (Form.useWatch("confirmed_by", form) as string | undefined)?.trim();
   const sameSigner = Boolean(confirmedBy && confirmedBy === user?.name);
@@ -99,18 +100,20 @@ export default function ReceivingPage() {
   const suppliers = options.supplier;
   const materialNames = options.material_name;
   const specs = options.spec;
-  const byCode = new Map(items.map((i) => [i.item_code, i]));
 
   // A 型號 IS a supplier's material at a spec — T7320BC is 臺灣希悅爾's
   // 高阻氧拉伸膜 340mm x 900M. Letting someone pick those three separately allows
   // combinations that do not exist, so choosing the 型號 fills them in and they
   // become read-only. They are only editable while defining a NEW 型號.
-  function onCodeChange(value: string) {
-    const found = items.find((i) => i.item_code === (value ?? "").trim());
-    setKnownCode(Boolean(found));
+  // Picking an item fills in everything it already knows; those fields are only
+  // editable while defining a NEW one. 原物料名稱 identifies it, 型號 is optional.
+  function onItemChange(value: number | undefined) {
+    const found = items.find((i) => i.id === value);
+    setKnownItem(Boolean(found));
     if (found) {
       form.setFieldsValue({
         item_name: found.name,
+        model: found.model,
         spec: found.spec,
         shelf_life_days: found.shelf_life_days,
         safety_stock: found.safety_stock,
@@ -120,7 +123,7 @@ export default function ReceivingPage() {
       });
     } else {
       form.setFieldsValue({
-        item_name: undefined, spec: undefined, supplier: undefined,
+        item_name: undefined, model: undefined, spec: undefined, supplier: undefined,
         meters_per_box: undefined, supplier_code: undefined,
       });
     }
@@ -132,8 +135,9 @@ export default function ReceivingPage() {
     setBusy(true);
     try {
       const res = await api.createLot({
-        item_code: values.item_code.trim(),
+        item_id: values.item_id ?? null,
         item_name: values.item_name,
+        model: values.model || null,
         spec: values.spec || null,
         shelf_life_days: values.shelf_life_days ?? null,
         safety_stock: values.safety_stock ?? 0,
@@ -177,7 +181,7 @@ export default function ReceivingPage() {
         "inspection", "verdict", "remark", "meters_per_box", "supplier_code",
         "shelf_life_days", "safety_stock",
       ]);
-      setKnownCode(false);
+      setKnownItem(false);
       load();
     } catch (e) {
       message.error((e as Error).message);
@@ -240,7 +244,7 @@ export default function ReceivingPage() {
                   form.resetFields();
                   form.setFieldsValue({ qty: 1, receipt_date: dayjs(), safety_stock: 0 });
                   setEnteredCount(0);
-                  setKnownCode(false);
+                  setKnownItem(false);
                 }}
               >
                 清空重填
@@ -269,9 +273,9 @@ export default function ReceivingPage() {
               <Form.Item
                 name="supplier"
                 label="廠商名稱"
-                extra={knownCode ? "由型號決定" : "新型號才需要填"}
+                extra={knownItem ? "由品項決定" : "新品項才需要填"}
               >
-                {knownCode ? (
+                {knownItem ? (
                   <Input disabled />
                 ) : (
                   <CreatableSelect options={suppliers} placeholder="選廠商" addLabel="新增廠商"
@@ -283,10 +287,10 @@ export default function ReceivingPage() {
               <Form.Item
                 name="item_name"
                 label="原物料名稱"
-                rules={[{ required: !knownCode, message: "新型號請填原物料名稱" }]}
-                extra={knownCode ? "由型號決定" : undefined}
+                rules={[{ required: true, message: "原物料名稱必填" }]}
+                extra={knownItem ? "由品項決定" : "新品項就填這個"}
               >
-                {knownCode ? (
+                {knownItem ? (
                   <Input disabled />
                 ) : (
                   <CreatableSelect options={materialNames} placeholder="選原物料名稱"
@@ -296,21 +300,21 @@ export default function ReceivingPage() {
             </Col>
             <Col xs={24} md={6}>
               <Form.Item
-                name="item_code"
-                label="型號"
-                rules={[{ required: true, message: "請填型號" }]}
-                extra="可直接打新型號，系統會一併建品項"
+                name="item_id"
+                label="品項"
+                extra={knownItem ? undefined : "找不到就留空，下面填名稱新增"}
               >
-                <CreatableSelect
-                  options={items.map((i) => i.item_code)}
-                  describe={(code) => {
-                    const item = byCode.get(code);
-                    if (!item) return code;
-                    return `${code}｜${item.name}${item.meters_per_box ? `（每箱 ${item.meters_per_box} 米）` : ""}`;
-                  }}
-                  onChange={onCodeChange}
-                  placeholder="選型號"
-                  addLabel="新增型號"
+                <Select
+                  allowClear
+                  showSearch
+                  placeholder="選品項"
+                  optionFilterProp="label"
+                  onChange={onItemChange}
+                  options={items.map((i) => ({
+                    value: i.id,
+                    label: `${i.label}｜${i.name}${i.spec ? ` ${i.spec}` : ""}`
+                      + `${i.meters_per_box ? `（每箱 ${i.meters_per_box} 米）` : ""}`,
+                  }))}
                 />
               </Form.Item>
             </Col>
@@ -338,9 +342,9 @@ export default function ReceivingPage() {
                       ? `= ${preview.boxes} 箱${preview.remainder ? `，剩 ${preview.remainder.toLocaleString()} 米對不上整箱` : ""}`
                       : rate
                         ? `每箱 ${rate.toLocaleString()} 米，輸入米數自動換算`
-                        : chosenCode
-                          ? `型號 ${chosenCode} 尚未設定每箱米數`
-                          : "先填型號"
+                        : chosenItem
+                          ? `${chosenLabel ?? "此品項"} 尚未設定每箱米數`
+                          : "先選品項"
                     : undefined
                 }
                 style={{ marginBottom: 0 }}
@@ -357,8 +361,8 @@ export default function ReceivingPage() {
               </Form.Item>
             </Col>
             <Col xs={24} md={6}>
-              <Form.Item name="spec" label="規格" extra={knownCode ? "由型號決定" : undefined}>
-                {knownCode ? (
+              <Form.Item name="spec" label="規格" extra={knownItem ? "由品項決定" : undefined}>
+                {knownItem ? (
                   <Input disabled />
                 ) : (
                   <CreatableSelect options={specs} placeholder="選規格" addLabel="新增規格"
@@ -471,17 +475,26 @@ export default function ReceivingPage() {
             </Col>
             <Col xs={24} md={6}>
               <Form.Item
+                name="model"
+                label="型號"
+                extra={knownItem ? "由品項決定" : "沒有型號可留空（例：脫氧劑）"}
+              >
+                <Input disabled={knownItem} placeholder="例 T6050BSW" allowClear />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={6}>
+              <Form.Item
                 name="supplier_code"
                 label="箱上完整料號"
-                extra="影像辨識用來對回型號，不填不影響收貨"
+                extra="影像辨識用來對回品項，不填不影響收貨"
               >
-                <Input placeholder="例 2003.T7320BC-340X900-P1" />
+                <Input disabled={knownItem} placeholder="例 2003.T7320BC-340X900-P1" />
               </Form.Item>
             </Col>
           </Row>
           {/* Only once a 型號 is on the form. Warning before they have typed
               anything is noise, and noise is how a real warning gets ignored. */}
-          {qtyMode === "米" && Boolean(chosenCode) && !rate && (
+          {qtyMode === "米" && Boolean(chosenItem) && !rate && (
             <Alert
               type="warning"
               title="要用米數收貨，得先設定每箱米數"
@@ -514,8 +527,8 @@ export default function ReceivingPage() {
           size="middle"
           locale={{ emptyText: <Empty description="尚無批次" image={Empty.PRESENTED_IMAGE_SIMPLE} /> }}
           columns={[
-            { title: "型號", dataIndex: "item_code" },
             { title: "原物料名稱", dataIndex: "item_name" },
+            { title: "型號", dataIndex: "item_model", render: (v) => v ?? "—" },
             { title: "廠商", dataIndex: "supplier", render: (v) => v ?? "—" },
             {
               title: "進貨日",
@@ -557,7 +570,7 @@ export default function ReceivingPage() {
               width: 60,
               render: (_, row: Lot) =>
                 row.qty_on_hand > 0 && row.verdict !== "不合格" ? (
-                  <Link href={`/issue?item=${encodeURIComponent(row.item_code)}`}>領用</Link>
+                  <Link href={`/issue?item=${row.item_id}`}>領用</Link>
                 ) : null,
             },
             {

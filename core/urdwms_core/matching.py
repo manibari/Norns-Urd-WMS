@@ -37,7 +37,7 @@ class ItemDeferReason(str, Enum):
 @dataclass(frozen=True)
 class ItemMatch:
     decision: Decision
-    item_code: str | None
+    item_id: str | None
     matched_on: str | None = None        # "supplier_code" | "model_in_label"
     reason: ItemDeferReason | None = None
     contenders: tuple[str, ...] = ()
@@ -51,23 +51,35 @@ def _compact(value: str) -> str:
     return value.upper().replace("-", "").replace(".", "").replace(" ", "").replace("_", "")
 
 
-def match_item_code(label_code: str | None, items: list[tuple[str, str | None]]) -> ItemMatch:
-    """Work out which 型號 a label belongs to.
+def match_item_code(
+    label_code: str | None,
+    items: list[tuple[str, str | None, str | None]],
+    model_code: str | None = None,
+) -> ItemMatch:
+    """Work out which item a label belongs to.
 
-    `items` is (型號, 箱上完整料號). The label carries the long supplier code
-    (`2003.T7320BC-340X900-P1`); people work in 型號 (`T7320BC`).
+    `items` is (id, 型號, 箱上完整料號). Recognition reports the 型號 it read
+    (`T6284BA`) and, when the label carries one, the full supplier part number it
+    sits inside (`2003.T7320BC-340X900-P1`). Both are searched: an exact hit on
+    the full code first, then the 型號 as a substring.
+
+    型號 is optional (the acceptance form's 脫氧劑 line has none), so an item
+    with neither a supplier code nor a 型號 cannot be matched from a label at
+    all. That is a correct outcome, not a failure — the operator picks it by hand.
 
     Same discipline as the lot matcher: lock only on a unique answer. Two 型號
     like `T6050B` and `T6050BSW` both sit inside the same label string, and
     picking the first one silently draws stock from the wrong item — so an
     ambiguous read defers to a human instead of guessing.
     """
-    if not label_code or not label_code.strip():
+    read = " ".join(filter(None, (model_code, label_code))).strip()
+    if not read:
         return ItemMatch(Decision.DEFER, None, reason=ItemDeferReason.NO_CODE_READ)
 
-    label = _compact(label_code)
+    label = _compact(label_code or model_code or "")
 
-    exact = [code for code, supplier_code in items if supplier_code and _compact(supplier_code) == label]
+    exact = [item_id for item_id, _, supplier_code in items
+             if supplier_code and _compact(supplier_code) == label]
     if len(exact) == 1:
         return ItemMatch(Decision.LOCK, exact[0], matched_on="supplier_code")
     if len(exact) > 1:
@@ -77,18 +89,23 @@ def match_item_code(label_code: str | None, items: list[tuple[str, str | None]])
     # Fall back to finding the 型號 inside the label string. Prefer the longest
     # match: `T6050BSW` beats `T6050B` on a label containing both, because the
     # longer one is the more specific reading, not a coincidence.
-    contained = [code for code, _ in items if _compact(code) and _compact(code) in label]
+    # Search both what was read: the 型號 on its own, and the full string it may
+    # have been embedded in.
+    haystacks = [_compact(v) for v in (model_code, label_code) if v]
+    contained = [(item_id, model) for item_id, model, _ in items
+                 if model and _compact(model)
+                 and any(_compact(model) in h for h in haystacks)]
     if not contained:
         return ItemMatch(Decision.DEFER, None, reason=ItemDeferReason.NO_ITEM_MATCH)
     if len(contained) == 1:
-        return ItemMatch(Decision.LOCK, contained[0], matched_on="model_in_label")
+        return ItemMatch(Decision.LOCK, contained[0][0], matched_on="model_in_label")
 
-    longest = max(len(_compact(c)) for c in contained)
-    best = [c for c in contained if len(_compact(c)) == longest]
+    longest = max(len(_compact(model)) for _, model in contained)
+    best = [item_id for item_id, model in contained if len(_compact(model)) == longest]
     if len(best) == 1:
         return ItemMatch(Decision.LOCK, best[0], matched_on="model_in_label")
     return ItemMatch(Decision.DEFER, None, reason=ItemDeferReason.AMBIGUOUS_ITEM,
-                     contenders=tuple(sorted(contained)))
+                     contenders=tuple(sorted(item_id for item_id, _ in contained)))
 
 
 class DeferReason(str, Enum):

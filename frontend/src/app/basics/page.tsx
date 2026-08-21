@@ -74,10 +74,12 @@ export default function BasicsPage() {
     setBusy(true);
     try {
       if (editing === "new") {
-        await api.createItem(values);
-        message.success(`已新增型號 ${values.item_code}`);
+        const created = await api.createItem(values);
+        message.success(`已新增品項 ${values.model || values.name}`);
+        void created;
       } else if (editing) {
-        await api.patchItem(editing.item_code, values);
+        // model may be cleared, so send it explicitly rather than dropping empties.
+        await api.patchItem(editing.id, { ...values, model: values.model || null });
         message.success("已更新");
       }
       setEditing(null);
@@ -90,9 +92,9 @@ export default function BasicsPage() {
     }
   }
 
-  async function removeItem(code: string) {
+  async function removeItem(item: Item) {
     try {
-      await api.deleteItem(code);
+      await api.deleteItem(item.id);
       message.success("已刪除");
       load();
     } catch (e) {
@@ -106,41 +108,52 @@ export default function BasicsPage() {
     <>
       <Alert
         type="info"
-        title="一個型號就是「某廠商的某原物料的某規格」"
-        description="所以廠商／原物料名稱／規格沒有各自的清單 —— 它們是這張表的欄位，要改就點那一列的「編輯」。收貨時只選型號，這三欄會自動帶出。米數是換算用的：驗收單數量填米，這張表換成箱；庫存記帳仍以箱為單位，一箱＝一捲，不做部分扣量。"
+        title="必填的是原物料名稱，型號可以沒有"
+        description="驗收單上「脫氧劑」那列就沒有型號，所以型號不是識別。廠商／規格也是這張表的欄位，不另開清單 —— 收貨時選了品項就會自動帶出。⚠️ 只有有型號（或登記過箱上完整料號）的品項，領用時才能靠影像辨識認出來；其餘一律人工選。"
         style={{ marginBottom: 24 }}
       />
 
       <Card
-        title="型號對照表"
+        title="品項主檔"
         extra={
           <Space>
-            {unset > 0 && <Text type="secondary">{unset} 項未設米數</Text>}
+            {unset > 0 && <Text type="secondary">{unset} 項未設米數（不能用米數收貨）</Text>}
             {can("item.manage") && (
               <Button
                 type="primary"
                 icon={<PlusOutlined />}
                 onClick={() => { setEditing("new"); form.resetFields(); }}
               >
-                新增型號
+                新增品項
               </Button>
             )}
           </Space>
         }
       >
         <Table
-          rowKey="item_code"
+          rowKey="id"
           dataSource={items}
           pagination={false}
           size="middle"
           scroll={{ x: 1200 }}
-          locale={{ emptyText: <Empty description="尚無型號" image={Empty.PRESENTED_IMAGE_SIMPLE} /> }}
+          locale={{ emptyText: <Empty description="尚無品項" image={Empty.PRESENTED_IMAGE_SIMPLE} /> }}
           columns={[
+            { title: "原物料名稱", dataIndex: "name", width: 190,
+              render: (v: string) => <Text strong>{v}</Text> },
             {
-              title: "型號", dataIndex: "item_code", width: 120,
-              render: (v: string) => <Text strong style={{ whiteSpace: "nowrap" }}>{v}</Text>,
+              title: "型號", dataIndex: "model", width: 130,
+              render: (v: string | null) =>
+                v
+                  ? <Text style={{ whiteSpace: "nowrap" }}>{v}</Text>
+                  : <Tooltip title="沒有型號，領用時只能人工選，不走影像辨識">
+                      <Text type="secondary">（無）</Text>
+                    </Tooltip>,
             },
-            { title: "原物料名稱", dataIndex: "name", width: 190 },
+            {
+              title: "影像辨識", width: 100,
+              render: (_, row: Item) =>
+                row.recognisable ? <Tag color="blue">可辨識</Tag> : <Tag>人工選</Tag>,
+            },
             { title: "規格", dataIndex: "spec", width: 140, render: (v) => v ?? "—" },
             { title: "廠商", dataIndex: "supplier", width: 110, render: (v) => v ?? "—" },
             {
@@ -187,9 +200,9 @@ export default function BasicsPage() {
                     </Tooltip>
                   ) : (
                     <Popconfirm
-                      title={`刪除 ${row.item_code}？`}
+                      title={`刪除 ${row.label}？`}
                       okText="刪除" cancelText="取消" okButtonProps={{ danger: true }}
-                      onConfirm={() => removeItem(row.item_code)}
+                      onConfirm={() => removeItem(row)}
                     >
                       <Button size="small" type="link" danger>刪除</Button>
                     </Popconfirm>
@@ -223,7 +236,7 @@ export default function BasicsPage() {
       <Card>
         <Tabs
           items={[
-            { key: "items", label: `型號（${items.length}）`, children: itemsTab },
+            { key: "items", label: `品項（${items.length}）`, children: itemsTab },
             ...Object.entries(dict?.categories ?? {}).map(([key, label]) => {
               const entries = dict?.entries[key] ?? [];
               return {
@@ -243,7 +256,7 @@ export default function BasicsPage() {
 
       <Modal
         open={Boolean(editing)}
-        title={editing === "new" ? "新增型號" : `編輯型號 ${editing && editing !== "new" ? editing.item_code : ""}`}
+        title={editing === "new" ? "新增品項" : `編輯品項 ${editing && editing !== "new" ? editing.label : ""}`}
         onCancel={() => { setEditing(null); form.resetFields(); }}
         onOk={saveItem}
         confirmLoading={busy}
@@ -253,17 +266,20 @@ export default function BasicsPage() {
           <Row gutter={16}>
             <Col span={8}>
               <Form.Item
-                name="item_code" label="型號"
-                rules={[{ required: true, message: "請填型號" }]}
-                extra={editing === "new" ? "驗收單上填的那個代號" : "型號不可修改"}
+                name="name" label="原物料名稱"
+                rules={[{ required: true, message: "請填原物料名稱" }]}
+                extra="識別品項用的就是這個"
               >
-                <Input disabled={editing !== "new"} placeholder="例 T6050BSW" />
+                <CreatableSelect options={options.material_name} placeholder="選或直接輸入"
+                                 addLabel="新增名稱" />
               </Form.Item>
             </Col>
             <Col span={8}>
-              <Form.Item name="name" label="原物料名稱" rules={[{ required: true, message: "請填名稱" }]}>
-                <CreatableSelect options={options.material_name} placeholder="選或直接輸入"
-                                 addLabel="新增名稱" />
+              <Form.Item
+                name="model" label="型號"
+                extra="沒有型號可以留空（例：脫氧劑）。留空的話領用不走影像辨識"
+              >
+                <Input placeholder="例 T6050BSW" allowClear />
               </Form.Item>
             </Col>
             <Col span={8}>

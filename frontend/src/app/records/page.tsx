@@ -110,7 +110,7 @@ export default function RecordsPage() {
           columns={[
             { title: "#", dataIndex: "id", width: 64 },
             { title: "時間", dataIndex: "captured_at", render: (v: string) => v.slice(0, 16).replace("T", " ") },
-            { title: "品名", dataIndex: "item_name", render: (v) => v ?? "—" },
+            { title: "品項", dataIndex: "item_label", render: (v) => v ?? "—" },
             { title: "取用批次", dataIndex: "receipt_date", render: (v) => v ?? "—" },
             {
               title: "狀態",

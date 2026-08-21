@@ -65,7 +65,7 @@ export default function AlertsPage() {
           dataSource={data.rejected}
           locale={empty("沒有不合格批次")}
           columns={[
-            { title: "型號", dataIndex: "item_code" },
+            { title: "型號", dataIndex: "model", render: (v) => v ?? "—" },
             { title: "原物料名稱", dataIndex: "name" },
             { title: "廠商", dataIndex: "supplier", render: (v) => v ?? "—" },
             { title: "進貨日", dataIndex: "receipt_date" },
@@ -87,7 +87,7 @@ export default function AlertsPage() {
           dataSource={data.expiring}
           locale={empty("尚無將到期批次")}
           columns={[
-            { title: "品名", dataIndex: "name" },
+            { title: "原物料名稱", dataIndex: "name" },
             { title: "進貨日", dataIndex: "receipt_date" },
             { title: "製造日", dataIndex: "manufacture_date" },
             {
@@ -118,7 +118,7 @@ export default function AlertsPage() {
           dataSource={data.stale}
           locale={empty("尚無呆滯批次")}
           columns={[
-            { title: "品名", dataIndex: "name" },
+            { title: "原物料名稱", dataIndex: "name" },
             { title: "進貨日", dataIndex: "receipt_date" },
             { title: "停留", dataIndex: "age_days", align: "right" as const, render: (v: number) => `${v} 天` },
             { title: "在庫", dataIndex: "qty_on_hand", align: "right" as const, render: (v) => `${v} 箱` },
@@ -134,8 +134,8 @@ export default function AlertsPage() {
           dataSource={data.low_stock}
           locale={empty("庫存都在水位之上")}
           columns={[
-            { title: "料號", dataIndex: "item_code" },
-            { title: "品名", dataIndex: "name" },
+            { title: "型號", dataIndex: "model", render: (v) => v ?? "—" },
+            { title: "原物料名稱", dataIndex: "name" },
             { title: "在庫", dataIndex: "on_hand", align: "right" as const, render: (v) => `${v} 箱` },
             { title: "安全水位", dataIndex: "safety_stock", align: "right" as const, render: (v) => `${v} 箱` },
           ]}
@@ -151,7 +151,7 @@ export default function AlertsPage() {
           locale={empty("沒有待補明細")}
           columns={[
             { title: "紀錄", dataIndex: "id", render: (v: number) => `#${v}` },
-            { title: "料號", dataIndex: "item_code" },
+            { title: "型號", dataIndex: "model", render: (v) => v ?? "—" },
             { title: "領用時間", dataIndex: "captured_at", render: (v: string) => v.slice(0, 16).replace("T", " ") },
           ]}
         />

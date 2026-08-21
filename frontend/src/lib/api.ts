@@ -1,7 +1,11 @@
 export type Lot = {
   id: number;
-  item_code: string;
+  item_id: number;
   item_name: string;
+  item_model: string | null;
+  item_spec: string | null;
+  /** 型號優先，沒型號就顯示名稱 */
+  item_label: string;
   receipt_date: string;
   manufacture_date: string | null;
   supplier_lot_code: string | null;
@@ -23,8 +27,15 @@ export type Lot = {
 };
 
 export type Item = {
-  item_code: string;
+  id: number;
+  /** 原物料名稱。必填 */
   name: string;
+  /** 型號。選填 —— 有些包材（脫氧劑）沒有型號 */
+  model: string | null;
+  /** 型號優先，沒型號就顯示名稱 */
+  label: string;
+  /** 有型號或登記過標籤料號才可能被影像辨識認出 */
+  recognisable: boolean;
   spec: string | null;
   unit: string;
   shelf_life_days: number | null;
@@ -42,8 +53,11 @@ export type Item = {
 };
 
 export type CatalogueEntry = {
-  item_code: string;
+  id: number;
   name: string;
+  model: string | null;
+  label: string;
+  recognisable: boolean;
   spec: string | null;
   meters_per_box: number | null;
   on_hand: number;
@@ -51,12 +65,14 @@ export type CatalogueEntry = {
 
 export type Proposal = {
   image_path: string;
-  /** 由影像判定的型號。辨識不出時為 null，此時要人工選 */
-  item_code: string | null;
+  /** 由影像判定的品項。辨識不出時為 null，此時要人工選 */
+  item_id: number | null;
   item_name: string | null;
+  item_model: string | null;
+  item_label: string | null;
   item_match: {
     decision: "lock" | "defer";
-    item_code: string | null;
+    item_id: number | null;
     matched_on: "supplier_code" | "model_in_label" | "manual" | null;
     reason: "no_code_read" | "no_item_match" | "ambiguous_item" | null;
     contenders: string[];
@@ -65,6 +81,9 @@ export type Proposal = {
   recognition: {
     receipt_date: string | null;
     manufacture_date: string | null;
+    /** 型號（T6284BA 這種短碼）—— 對映的關鍵 */
+    model_code: string | null;
+    /** 箱上完整料號，若標籤上有 */
     item_code: string | null;
     confidence: number;
     stamp_visible: boolean;
@@ -84,8 +103,10 @@ export type Proposal = {
 
 export type Scan = {
   id: number;
-  item_code: string;
+  item_id: number;
   item_name: string | null;
+  item_model: string | null;
+  item_label: string | null;
   lot_id: number | null;
   status: "posted" | "blocked_fifo" | "blocked_unreadable" | "overridden" | "voided";
   captured_at: string;
@@ -109,7 +130,7 @@ export type Alerts = {
   expiring: (Lot & { expires_on: string; days_left: number; name: string })[];
   stale: (Lot & { age_days: number; name: string })[];
   low_stock: { item_code: string; name: string; safety_stock: number; on_hand: number }[];
-  pending_detail: { id: number; item_code: string; captured_at: string }[];
+  pending_detail: { id: number; item_id: number; captured_at: string }[];
   rejected: (Lot & { name: string })[];
 };
 
@@ -203,12 +224,12 @@ export const api = {
       body: JSON.stringify(body),
     }),
   items: () => req<Item[]>("/api/items"),
-  lots: (itemCode?: string) =>
-    req<Lot[]>(`/api/lots${itemCode ? `?item_code=${encodeURIComponent(itemCode)}` : ""}`),
+  lots: (itemId?: number) => req<Lot[]>(`/api/lots${itemId ? `?item_id=${itemId}` : ""}`),
   createLot: (body: Record<string, unknown>) =>
     req<{
       id: number;
       receipt_date: string;
+      item_id: number;
       created_item: boolean;
       duplicate_lot_exists: boolean;
       qty: number;
@@ -216,8 +237,8 @@ export const api = {
       verdict: string | null;
       same_signer: boolean;
     }>("/api/lots", json(body)),
-  patchItem: (code: string, body: Record<string, unknown>) =>
-    req<Record<string, unknown>>(`/api/items/${encodeURIComponent(code)}`, {
+  patchItem: (id: number, body: Record<string, unknown>) =>
+    req<Record<string, unknown>>(`/api/items/${id}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
@@ -228,9 +249,9 @@ export const api = {
     form.append("image", file);
     return req<Proposal>("/api/recognize", { method: "POST", body: form });
   },
-  /** 辨識不出型號時，人工指定後重新比對批次（不重跑辨識、不重複計費） */
-  resolveItem: (itemCode: string, ocrReceiptDate: string | null) =>
-    req<Partial<Proposal>>("/api/resolve-item", json({ item_code: itemCode, ocr_receipt_date: ocrReceiptDate })),
+  /** 辨識不出品項時，人工指定後重新比對批次（不重跑辨識、不重複計費） */
+  resolveItem: (itemId: number, ocrReceiptDate: string | null) =>
+    req<Partial<Proposal>>("/api/resolve-item", json({ item_id: itemId, ocr_receipt_date: ocrReceiptDate })),
   createScan: (body: Record<string, unknown>) =>
     req<{ id: number; status: Scan["status"]; fifo_expected_date?: string }>("/api/scans", json(body)),
   scans: (status?: string) => req<Scan[]>(`/api/scans${status ? `?status=${status}` : ""}`),
@@ -246,8 +267,8 @@ export const api = {
       body: JSON.stringify({ label }),
     }),
   createItem: (body: Record<string, unknown>) => req<Record<string, unknown>>("/api/items", json(body)),
-  deleteItem: (code: string) =>
-    req<{ item_code: string; deleted: boolean }>(`/api/items/${encodeURIComponent(code)}`, { method: "DELETE" }),
+  deleteItem: (id: number) =>
+    req<{ id: number; deleted: boolean }>(`/api/items/${id}`, { method: "DELETE" }),
   patchLot: (id: number, body: Record<string, unknown>) =>
     req<{ id: number; changed: Record<string, unknown>; posted_draws: number }>(`/api/lots/${id}`, {
       method: "PATCH",

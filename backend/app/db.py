@@ -23,23 +23,28 @@ DB_PATH = Path(__file__).resolve().parents[1] / "urdwms.db"
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS inventory_item (
-    -- 型號. 驗收單上填的就是這個 (例 T6050BSW), 也是米數對照表的 key.
-    item_code        TEXT PRIMARY KEY,
-    name             TEXT NOT NULL,
+    -- Surrogate key: 型號不是每個品項都有 (驗收單上「脫氧劑」那列型號就是空的),
+    -- 所以不能拿它當主鍵. 必填的是原物料名稱.
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    name             TEXT NOT NULL,   -- 原物料名稱. 必填
+    model            TEXT,            -- 型號 (例 T6050BSW). 選填, 有填則不可重複
     spec             TEXT,
     unit             TEXT NOT NULL DEFAULT '箱',
     shelf_life_days  INTEGER,
     safety_stock     INTEGER NOT NULL DEFAULT 0,
     meters_per_box   INTEGER,         -- 每箱米數. NULL = 此品項不用米數換算
     -- 箱上標籤印的完整料號 (例 2003.T7320BC-340X900-P1). 人不填這個, 影像辨識讀到的
-    -- 是它, 所以留著做型號對映 (requirement 4 正規化對映表).
+    -- 是它, 用來對映回品項 (requirement 4 正規化對映表).
     supplier_code    TEXT,
     supplier         TEXT             -- 預設廠商, 收貨時帶出
 );
 
+CREATE UNIQUE INDEX IF NOT EXISTS idx_item_model
+    ON inventory_item(model) WHERE model IS NOT NULL;
+
 CREATE TABLE IF NOT EXISTS inventory_lot (
     id                INTEGER PRIMARY KEY AUTOINCREMENT,
-    item_code         TEXT NOT NULL REFERENCES inventory_item(item_code),
+    item_id           INTEGER NOT NULL REFERENCES inventory_item(id),
     receipt_date      TEXT NOT NULL,      -- ISO. FIFO sort key. From the acceptance stamp, read at receiving.
     manufacture_date  TEXT,
     supplier_lot_code TEXT,
@@ -62,7 +67,7 @@ CREATE TABLE IF NOT EXISTS inventory_lot (
 
 CREATE TABLE IF NOT EXISTS material_usage_scan (
     id                   INTEGER PRIMARY KEY AUTOINCREMENT,
-    item_code            TEXT,
+    item_id              INTEGER REFERENCES inventory_item(id),
     lot_id               INTEGER REFERENCES inventory_lot(id),
     status               TEXT NOT NULL,   -- posted | blocked_fifo | blocked_unreadable | overridden | voided
     captured_at          TEXT NOT NULL,

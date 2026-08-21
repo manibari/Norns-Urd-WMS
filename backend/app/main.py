@@ -54,14 +54,14 @@ def startup() -> None:
 
 # --------------------------------------------------------------------------- helpers
 
-def _candidates(conn, item_code: str) -> list[Candidate]:
+def _candidates(conn, item_id: int) -> list[Candidate]:
     # A rejected lot is not a candidate. It stays on the books (the record is the
     # deliverable) but FIFO must never point anyone at it, and nobody may draw it.
     rows = conn.execute(
         "SELECT id, receipt_date FROM inventory_lot"
-        " WHERE item_code = ? AND qty_on_hand > 0 AND COALESCE(verdict, '合格') <> '不合格'"
+        " WHERE item_id = ? AND qty_on_hand > 0 AND COALESCE(verdict, '合格') <> '不合格'"
         " ORDER BY receipt_date",
-        (item_code,),
+        (item_id,),
     ).fetchall()
     return [Candidate(str(r["id"]), r["receipt_date"]) for r in rows]
 
@@ -88,21 +88,25 @@ class LotIn(BaseModel):
     """One line off the acceptance form (包材驗收單).
 
     Field order on paper: 進貨日期 / 廠商名稱 / 原物料名稱 / 型號 / 數量(米).
-    `item_code` is the 型號 — the short code the warehouse actually writes and
-    the key of the metres table. The long code printed on the box lives in
-    `supplier_code` and exists only so recognition can map back to a 型號.
+    原物料名稱 is required and 型號 is optional — the form's 脫氧劑 line has no
+    model number at all, so 型號 cannot be the identifier. The long code printed
+    on the box lives in `supplier_code` and exists only so recognition can map a
+    label back to an item.
     """
 
-    item_code: str                      # 型號, e.g. T6050BSW
+    # 既有品項填 item_id；新品項留空並填 item_name（必填）與 model（選填）。
+    item_id: int | None = None
     receipt_date: str
     supplier: str | None = None         # 廠商名稱
     manufacture_date: str | None = None
     supplier_lot_code: str | None = None
     qty: int = 1
-    # Receiving is where an item first appears in the system, so an unknown code
-    # must be creatable here rather than sending the warehouse to a separate
-    # master-data screen first. Supply a name and the item is created with it.
+    # Receiving is where an item first appears in the system, so a new one must
+    # be creatable here rather than sending the warehouse to a separate
+    # master-data screen first. 原物料名稱 is what identifies it; 型號 is optional
+    # (the form's 脫氧劑 line has none).
     item_name: str | None = None
+    model: str | None = None
     spec: str | None = None
     unit: str = "箱"
     shelf_life_days: int | None = None
@@ -123,8 +127,8 @@ class LotIn(BaseModel):
 
 
 class ItemIn(BaseModel):
-    item_code: str
-    name: str
+    name: str                    # 原物料名稱. 必填
+    model: str | None = None     # 型號. 選填
     spec: str | None = None
     unit: str = "箱"
     shelf_life_days: int | None = None
@@ -136,6 +140,7 @@ class ItemIn(BaseModel):
 
 class ItemPatch(BaseModel):
     name: str | None = None
+    model: str | None = None
     spec: str | None = None
     shelf_life_days: int | None = None
     safety_stock: int | None = None
@@ -159,7 +164,7 @@ class LotPatch(BaseModel):
 
 
 class ScanIn(BaseModel):
-    item_code: str
+    item_id: int
     lot_id: int | None = None
     image_path: str | None = None
     ocr_receipt_date: str | None = None
@@ -497,10 +502,20 @@ def items(user: dict = Depends(current_user)) -> list[dict]:
             " COUNT(CASE WHEN l.qty_on_hand > 0 AND COALESCE(l.verdict,'合格') <> '不合格' THEN 1 END)"
             "   AS open_lots,"
             " COALESCE(SUM(CASE WHEN l.verdict = '不合格' THEN l.qty_on_hand ELSE 0 END), 0) AS rejected_qty"
-            " FROM inventory_item i LEFT JOIN inventory_lot l ON l.item_code = i.item_code"
-            " GROUP BY i.item_code ORDER BY i.item_code",
+            " FROM inventory_item i LEFT JOIN inventory_lot l ON l.item_id = i.id"
+            " GROUP BY i.id ORDER BY i.name, i.model",
         ).fetchall()
-    return [{**dict(r), "on_hand_m": meters_from_boxes(r["on_hand"], r["meters_per_box"])} for r in rows]
+    return [
+        {
+            **dict(r),
+            "on_hand_m": meters_from_boxes(r["on_hand"], r["meters_per_box"]),
+            # 有型號才有東西可以跟標籤對映 —— 沒型號也沒登記標籤料號的品項,
+            # 影像辨識永遠認不出來, 領用時直接人工選 (見 /api/recognize).
+            "recognisable": bool(r["model"] or r["supplier_code"]),
+            "label": r["model"] or r["name"],
+        }
+        for r in rows
+    ]
 
 
 @app.get("/api/item-options")
@@ -523,93 +538,106 @@ def item_options(user: dict = Depends(current_user)) -> dict:
     }
 
 
-@app.patch("/api/items/{item_code:path}")
-def update_item(item_code: str, payload: ItemPatch,
+@app.patch("/api/items/{item_id}")
+def update_item(item_id: int, payload: ItemPatch,
                 user: dict = Depends(requires("item.manage"))) -> dict:
-    """Edit the master record, including the metres-per-box rate."""
+    """Edit the master record, including 型號 and the metres-per-box rate."""
     changes = {k: v for k, v in payload.model_dump().items() if v is not None}
     if not changes:
         raise HTTPException(400, "沒有要更新的欄位")
+    if "name" in changes and not str(changes["name"]).strip():
+        raise HTTPException(400, "原物料名稱不可空白")
     if "meters_per_box" in changes and changes["meters_per_box"] <= 0:
         raise HTTPException(400, "每箱米數必須大於 0（不用米數換算請留空）")
+    if "model" in changes:
+        changes["model"] = str(changes["model"]).strip() or None
     with transaction() as conn:
-        if not conn.execute("SELECT 1 FROM inventory_item WHERE item_code = ?", (item_code,)).fetchone():
-            raise HTTPException(404, f"料號 {item_code} 不存在")
+        if not conn.execute("SELECT 1 FROM inventory_item WHERE id = ?", (item_id,)).fetchone():
+            raise HTTPException(404, "品項不存在")
+        if changes.get("model") and conn.execute(
+                "SELECT 1 FROM inventory_item WHERE model = ? AND id <> ?",
+                (changes["model"], item_id)).fetchone():
+            raise HTTPException(409, f"型號 {changes['model']} 已被其他品項使用")
         conn.execute(f"UPDATE inventory_item SET {', '.join(f'{k} = ?' for k in changes)}"
-                     " WHERE item_code = ?", (*changes.values(), item_code))
-        log(conn, user["name"], "item.update", {"item_code": item_code, **changes})
-    return {"item_code": item_code, **changes}
+                     " WHERE id = ?", (*changes.values(), item_id))
+        log(conn, user["name"], "item.update", {"id": item_id, **changes})
+    return {"id": item_id, **changes}
 
 
 @app.post("/api/items")
 def create_item(payload: ItemIn, user: dict = Depends(requires("item.manage"))) -> dict:
+    name = payload.name.strip()
+    model = (payload.model or "").strip() or None
+    if not name:
+        raise HTTPException(400, "原物料名稱不可空白")
     with transaction() as conn:
-        if conn.execute("SELECT 1 FROM inventory_item WHERE item_code = ?", (payload.item_code,)).fetchone():
-            raise HTTPException(409, f"料號 {payload.item_code} 已存在")
-        conn.execute(
-            "INSERT INTO inventory_item (item_code, name, spec, unit, shelf_life_days, safety_stock,"
+        if model and conn.execute("SELECT 1 FROM inventory_item WHERE model = ?", (model,)).fetchone():
+            raise HTTPException(409, f"型號 {model} 已存在")
+        cursor = conn.execute(
+            "INSERT INTO inventory_item (name, model, spec, unit, shelf_life_days, safety_stock,"
             " meters_per_box, supplier_code, supplier) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (payload.item_code.strip(), payload.name.strip(), payload.spec, payload.unit,
-             payload.shelf_life_days, payload.safety_stock, payload.meters_per_box,
-             payload.supplier_code, payload.supplier),
+            (name, model, payload.spec, payload.unit, payload.shelf_life_days,
+             payload.safety_stock, payload.meters_per_box, payload.supplier_code, payload.supplier),
         )
-        log(conn, user["name"], "item.create", {"item_code": payload.item_code})
-    return {"item_code": payload.item_code}
+        log(conn, user["name"], "item.create", {"id": cursor.lastrowid, "name": name, "model": model})
+    return {"id": cursor.lastrowid, "name": name, "model": model}
 
 
-@app.delete("/api/items/{item_code:path}")
-def delete_item(item_code: str, user: dict = Depends(requires("item.manage"))) -> dict:
+@app.delete("/api/items/{item_id}")
+def delete_item(item_id: int, user: dict = Depends(requires("item.manage"))) -> dict:
     """Delete a 型號 — only while no lot references it.
 
     Same boundary as deleting a lot: the master record is what a usage record's
-    item_code resolves to, so removing one with history behind it turns every
-    traceability answer about it into a dangling code.
+    item_id resolves to, so removing one with history behind it turns every
+    traceability answer about it into a dangling reference.
     """
     with transaction() as conn:
-        row = conn.execute("SELECT * FROM inventory_item WHERE item_code = ?", (item_code,)).fetchone()
+        row = conn.execute("SELECT * FROM inventory_item WHERE id = ?", (item_id,)).fetchone()
         if row is None:
-            raise HTTPException(404, f"型號 {item_code} 不存在")
-        lots = conn.execute("SELECT COUNT(*) AS n FROM inventory_lot WHERE item_code = ?",
-                            (item_code,)).fetchone()["n"]
-        scans = conn.execute("SELECT COUNT(*) AS n FROM material_usage_scan WHERE item_code = ?",
-                             (item_code,)).fetchone()["n"]
+            raise HTTPException(404, "品項不存在")
+        label = row["model"] or row["name"]
+        lots = conn.execute("SELECT COUNT(*) AS n FROM inventory_lot WHERE item_id = ?",
+                            (item_id,)).fetchone()["n"]
+        scans = conn.execute("SELECT COUNT(*) AS n FROM material_usage_scan WHERE item_id = ?",
+                             (item_id,)).fetchone()["n"]
         if lots or scans:
             raise HTTPException(
                 409,
-                f"型號 {item_code} 已有 {lots} 批進貨、{scans} 筆領用紀錄，刪掉會讓那些紀錄失去對應。"
+                f"{label} 已有 {lots} 批進貨、{scans} 筆領用紀錄，刪掉會讓那些紀錄失去對應。"
                 " 不再使用請把安全水位設 0 並停止收貨。",
             )
-        conn.execute("DELETE FROM inventory_item WHERE item_code = ?", (item_code,))
-        log(conn, user["name"], "item.delete", {"item_code": item_code, "name": row["name"]})
-    return {"item_code": item_code, "deleted": True}
+        conn.execute("DELETE FROM inventory_item WHERE id = ?", (item_id,))
+        log(conn, user["name"], "item.delete", {"id": item_id, "name": row["name"], "model": row["model"]})
+    return {"id": item_id, "deleted": True}
 
 
 @app.get("/api/lots")
-def lots(item_code: str | None = None, user: dict = Depends(current_user)) -> list[dict]:
+def lots(item_id: int | None = None, user: dict = Depends(current_user)) -> list[dict]:
     with transaction() as conn:
-        sql = ("SELECT l.*, i.name AS item_name FROM inventory_lot l"
-               " JOIN inventory_item i ON i.item_code = l.item_code")
+        sql = ("SELECT l.*, i.name AS item_name, i.model AS item_model, i.spec AS item_spec"
+               " FROM inventory_lot l JOIN inventory_item i ON i.id = l.item_id")
         params: tuple = ()
-        if item_code:
-            sql += " WHERE l.item_code = ?"
-            params = (item_code,)
-        sql += " ORDER BY l.item_code, l.receipt_date"
+        if item_id:
+            sql += " WHERE l.item_id = ?"
+            params = (item_id,)
+        sql += " ORDER BY i.name, i.model, l.receipt_date"
         rows = [dict(r) for r in conn.execute(sql, params).fetchall()]
         drawn = {r["lot_id"]: r["n"] for r in conn.execute(
             "SELECT lot_id, COUNT(*) AS n FROM material_usage_scan"
             " WHERE lot_id IS NOT NULL GROUP BY lot_id").fetchall()}
 
-        by_item: dict[str, list[Candidate]] = {}
+        by_item: dict[int, list[Candidate]] = {}
         for row in rows:
-            by_item.setdefault(row["item_code"], [])
-        for code in by_item:
-            by_item[code] = _candidates(conn, code)
+            by_item.setdefault(row["item_id"], [])
+        for key in by_item:
+            by_item[key] = _candidates(conn, key)
 
     for row in rows:
-        expected = fifo_expected(by_item.get(row["item_code"], []))
+        expected = fifo_expected(by_item.get(row["item_id"], []))
         row["is_fifo_next"] = str(row["id"]) in expected
         row["inspection"] = json.loads(row.get("inspection") or "{}")
         row["draw_count"] = drawn.get(row["id"], 0)
+        row["item_label"] = row["item_model"] or row["item_name"]
     return rows
 
 
@@ -692,7 +720,7 @@ def delete_lot(lot_id: int, user: dict = Depends(requires("lot.delete"))) -> dic
         conn.execute("DELETE FROM inventory_lot WHERE id = ?", (lot_id,))
         log(conn, user["name"], "lot.delete", {
             "lot_id": lot_id,
-            "deleted": {k: row[k] for k in ("item_code", "receipt_date", "manufacture_date",
+            "deleted": {k: row[k] for k in ("item_id", "receipt_date", "manufacture_date",
                                             "qty_on_hand", "supplier", "verdict")},
         })
     return {"id": lot_id, "deleted": True}
@@ -713,25 +741,30 @@ def create_lot(payload: LotIn, user: dict = Depends(requires("lot.create"))) -> 
     expiry = to_date_key(payload.expiry_date) if payload.expiry_date else None
     if payload.verdict not in (None, "合格", "不合格"):
         raise HTTPException(400, "判定只能是合格或不合格")
-    item_code = payload.item_code.strip()
-    if not item_code:
-        raise HTTPException(400, "料號不可空白")
-
     created_item = False
     with transaction() as conn:
-        known = conn.execute("SELECT 1 FROM inventory_item WHERE item_code = ?", (item_code,)).fetchone()
-        if not known:
+        item_id = payload.item_id
+        known = conn.execute("SELECT * FROM inventory_item WHERE id = ?", (item_id,)).fetchone() \
+            if item_id else None
+        if known is None:
+            # New item. 原物料名稱 is what identifies it; 型號 is optional, because
+            # the acceptance form's 脫氧劑 line simply has no model number.
             if not (payload.item_name or "").strip():
-                raise HTTPException(400, f"料號 {item_code} 不在主檔，請一併填品名以新增品項")
-            conn.execute(
-                "INSERT INTO inventory_item (item_code, name, spec, unit, shelf_life_days, safety_stock,"
+                raise HTTPException(400, "新品項請填原物料名稱")
+            model = (payload.model or "").strip() or None
+            if model and conn.execute("SELECT 1 FROM inventory_item WHERE model = ?", (model,)).fetchone():
+                raise HTTPException(409, f"型號 {model} 已存在，請直接選那個品項")
+            cursor = conn.execute(
+                "INSERT INTO inventory_item (name, model, spec, unit, shelf_life_days, safety_stock,"
                 " meters_per_box, supplier_code, supplier) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (item_code, payload.item_name.strip(), payload.spec, payload.unit,
+                (payload.item_name.strip(), model, payload.spec, payload.unit,
                  payload.shelf_life_days, payload.safety_stock, payload.meters_per_box,
                  payload.supplier_code, payload.supplier),
             )
+            item_id = cursor.lastrowid
             created_item = True
-            log(conn, user["name"], "item.create", {"item_code": item_code, "name": payload.item_name})
+            log(conn, user["name"], "item.create",
+                {"id": item_id, "name": payload.item_name, "model": model})
         elif payload.item_name or payload.shelf_life_days is not None or payload.safety_stock:
             # Receiving is also when someone notices the master data is wrong.
             # Let them fix it in place, but never silently — it hits audit_log.
@@ -747,9 +780,9 @@ def create_lot(payload: LotIn, user: dict = Depends(requires("lot.create"))) -> 
                     updates.append(f"{column} = ?")
                     params.append(value)
             if updates:
-                conn.execute(f"UPDATE inventory_item SET {', '.join(updates)} WHERE item_code = ?",
-                             (*params, item_code))
-                log(conn, user["name"], "item.update", {"item_code": item_code, "changed": updates})
+                conn.execute(f"UPDATE inventory_item SET {', '.join(updates)} WHERE id = ?",
+                             (*params, item_id))
+                log(conn, user["name"], "item.update", {"id": item_id, "changed": updates})
         # One delivery can arrive as several manufacture-date batches, and the form
         # records them as separate lines — so same 型號 + same receipt date is
         # NORMAL, not a duplicate. Only an identical manufacture date makes it
@@ -757,20 +790,20 @@ def create_lot(payload: LotIn, user: dict = Depends(requires("lot.create"))) -> 
         # train people to dismiss the warning, and then the real one goes unread.
         existing = conn.execute(
             "SELECT id, qty_on_hand FROM inventory_lot"
-            " WHERE item_code = ? AND receipt_date = ?"
+            " WHERE item_id = ? AND receipt_date = ?"
             "   AND COALESCE(manufacture_date, '') = COALESCE(?, '')",
-            (item_code, parsed.iso, manufacture.iso if manufacture else None),
+            (item_id, parsed.iso, manufacture.iso if manufacture else None),
         ).fetchone()
         qty = payload.qty
         conversion = None
         if payload.qty_meters is not None:
             # The rate may have been supplied on this very request (new item), so
             # read it back rather than trusting the payload alone.
-            rate = conn.execute("SELECT meters_per_box FROM inventory_item WHERE item_code = ?",
-                                (item_code,)).fetchone()["meters_per_box"]
+            rate = conn.execute("SELECT meters_per_box FROM inventory_item WHERE id = ?",
+                                (item_id,)).fetchone()["meters_per_box"]
             conversion = boxes_from_meters(payload.qty_meters, rate)
             if conversion is None:
-                raise HTTPException(400, f"料號 {item_code} 尚未設定每箱米數，無法用米數收貨")
+                raise HTTPException(400, "此品項尚未設定每箱米數，無法用米數收貨")
             if conversion.boxes < 1:
                 raise HTTPException(
                     400,
@@ -780,11 +813,11 @@ def create_lot(payload: LotIn, user: dict = Depends(requires("lot.create"))) -> 
             qty = conversion.boxes
 
         cursor = conn.execute(
-            "INSERT INTO inventory_lot (item_code, receipt_date, manufacture_date, expiry_date,"
+            "INSERT INTO inventory_lot (item_id, receipt_date, manufacture_date, expiry_date,"
             " supplier_lot_code, supplier, entered_meters, entered_unit, inspection, verdict,"
             " recorded_by, confirmed_by, remark, qty_on_hand, created_at, created_by)"
             " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (item_code, parsed.iso, manufacture.iso if manufacture else None,
+            (item_id, parsed.iso, manufacture.iso if manufacture else None,
              expiry.iso if expiry else None, payload.supplier_lot_code, payload.supplier,
              payload.qty_meters, payload.entered_unit,
              json.dumps(payload.inspection, ensure_ascii=False), payload.verdict,
@@ -795,11 +828,12 @@ def create_lot(payload: LotIn, user: dict = Depends(requires("lot.create"))) -> 
         )
         lot_id = cursor.lastrowid
         log(conn, user["name"], "lot.create",
-            {"lot_id": lot_id, "item_code": item_code, "receipt_date": parsed.iso, "qty": qty,
+            {"lot_id": lot_id, "item_id": item_id, "receipt_date": parsed.iso, "qty": qty,
              "entered": payload.qty_meters, "verdict": payload.verdict,
              "recorded_by": user["name"], "confirmed_by": payload.confirmed_by})
     return {
         "id": lot_id,
+        "item_id": item_id,
         "receipt_date": parsed.iso,
         "created_item": created_item,
         "qty": qty,
@@ -823,7 +857,7 @@ def create_lot(payload: LotIn, user: dict = Depends(requires("lot.create"))) -> 
 # --------------------------------------------------------------------------- recognition
 
 @app.post("/api/recognize")
-async def recognize(image: UploadFile = File(...), item_code: str | None = Form(default=None),
+async def recognize(image: UploadFile = File(...), item_id: int | None = Form(default=None),
                     user: dict = Depends(requires("issue.create"))) -> dict:
     """Recognise a box: which 型號 it is, and which lot.
 
@@ -832,7 +866,12 @@ async def recognize(image: UploadFile = File(...), item_code: str | None = Form(
     same fallback shape as the lot matcher — one rule, one failure mode, one
     thing to explain on the floor.
 
-    Passing `item_code` overrides the label reading; that is the path used when
+    Only items with a 型號 or a registered supplier code can be identified this
+    way — there is nothing on the label to map back from otherwise (the form's
+    脫氧劑 line has no model number). Those are picked by hand, which is a normal
+    path, not a failure.
+
+    Passing `item_id` overrides the label reading; that is the path used when
     the operator has already resolved a deferral.
 
     Nothing is written and no stock moves. The confirmation step stays because
@@ -850,23 +889,29 @@ async def recognize(image: UploadFile = File(...), item_code: str | None = Form(
         reading = Recognition(error=str(exc))
 
     with transaction() as conn:
-        master = [(r["item_code"], r["supplier_code"]) for r in conn.execute(
-            "SELECT item_code, supplier_code FROM inventory_item").fetchall()]
-        catalogue = [dict(r) for r in conn.execute(
-            "SELECT i.item_code, i.name, i.spec, i.meters_per_box,"
-            "       COALESCE(SUM(CASE WHEN COALESCE(l.verdict, '合格') <> '不合格'"
-            "                          THEN l.qty_on_hand ELSE 0 END), 0) AS on_hand"
-            " FROM inventory_item i LEFT JOIN inventory_lot l ON l.item_code = i.item_code"
-            " GROUP BY i.item_code ORDER BY i.item_code").fetchall()]
+        master = [(str(r["id"]), r["model"], r["supplier_code"]) for r in conn.execute(
+            "SELECT id, model, supplier_code FROM inventory_item").fetchall()]
+        catalogue = [
+            {**dict(r), "label": r["model"] or r["name"],
+             # 有型號或登記過標籤料號才有東西可以對映; 其餘品項一律人工選.
+             "recognisable": bool(r["model"] or r["supplier_code"])}
+            for r in conn.execute(
+                "SELECT i.id, i.name, i.model, i.spec, i.meters_per_box, i.supplier_code,"
+                "       COALESCE(SUM(CASE WHEN COALESCE(l.verdict, '合格') <> '不合格'"
+                "                          THEN l.qty_on_hand ELSE 0 END), 0) AS on_hand"
+                " FROM inventory_item i LEFT JOIN inventory_lot l ON l.item_id = i.id"
+                " GROUP BY i.id ORDER BY i.name, i.model").fetchall()
+        ]
 
-    item_match = match_item_code(reading.item_code, master)
-    resolved = item_code or (item_match.item_code if item_match.locked else None)
+    item_match = match_item_code(reading.item_code, master, model_code=reading.model_code)
+    resolved = item_id or (int(item_match.item_id) if item_match.locked else None)
 
     payload: dict = {
         "image_path": f"/uploads/{path.name}",
         "recognition": {
             "receipt_date": reading.receipt_date,
             "manufacture_date": reading.manufacture_date,
+            "model_code": reading.model_code,
             "item_code": reading.item_code,
             "confidence": reading.receipt_date_confidence,
             "item_code_confidence": reading.item_code_confidence,
@@ -876,11 +921,11 @@ async def recognize(image: UploadFile = File(...), item_code: str | None = Form(
         },
         "item_match": {
             "decision": "lock" if resolved else "defer",
-            "item_code": resolved,
+            "item_id": resolved,
             # Distinguishes "the label said so" from "a human overrode it",
             # which matters when reading the record back months later.
-            "matched_on": item_match.matched_on if item_match.locked and not item_code else
-                          ("manual" if item_code else None),
+            "matched_on": item_match.matched_on if item_match.locked and not item_id else
+                          ("manual" if item_id else None),
             "reason": item_match.reason.value if item_match.reason and not resolved else None,
             "contenders": list(item_match.contenders),
         },
@@ -889,7 +934,7 @@ async def recognize(image: UploadFile = File(...), item_code: str | None = Form(
     }
 
     if resolved is None:
-        payload.update({"item_code": None, "item_name": None, "candidates": [],
+        payload.update({"item_id": None, "item_name": None, "item_label": None, "candidates": [],
                         "decision": "defer", "defer_reason": "item_unresolved",
                         "match_distance": None, "locked_lot": None,
                         "fifo_ok": None, "fifo_expected_date": None})
@@ -899,19 +944,21 @@ async def recognize(image: UploadFile = File(...), item_code: str | None = Form(
     return payload
 
 
-def _lot_lookup(item_code: str, read_receipt_date: str | None) -> dict:
+def _lot_lookup(item_id: int, read_receipt_date: str | None) -> dict:
     """Match a read receipt date against the item's drawable lots, and judge FIFO."""
     with transaction() as conn:
-        candidates = _candidates(conn, item_code)
-        item = conn.execute("SELECT * FROM inventory_item WHERE item_code = ?", (item_code,)).fetchone()
+        candidates = _candidates(conn, item_id)
+        item = conn.execute("SELECT * FROM inventory_item WHERE id = ?", (item_id,)).fetchone()
         lot_rows = {str(r["id"]): dict(r) for r in conn.execute(
-            "SELECT * FROM inventory_lot WHERE item_code = ? AND qty_on_hand > 0"
-            " AND COALESCE(verdict, '合格') <> '不合格'", (item_code,)).fetchall()}
+            "SELECT * FROM inventory_lot WHERE item_id = ? AND qty_on_hand > 0"
+            " AND COALESCE(verdict, '合格') <> '不合格'", (item_id,)).fetchall()}
 
     result = match_candidates(to_date_key(read_receipt_date), candidates)
     out: dict = {
-        "item_code": item_code,
+        "item_id": item_id,
         "item_name": item["name"] if item else None,
+        "item_model": item["model"] if item else None,
+        "item_label": (item["model"] or item["name"]) if item else None,
         "expected_supplier_code": item["supplier_code"] if item else None,
         "candidates": [
             {"lot_id": int(c.lot_id), "receipt_date": c.receipt_date,
@@ -942,7 +989,7 @@ def _lot_lookup(item_code: str, read_receipt_date: str | None) -> dict:
 
 
 class ResolveIn(BaseModel):
-    item_code: str
+    item_id: int
     ocr_receipt_date: str | None = None
 
 
@@ -955,8 +1002,8 @@ def resolve_item(payload: ResolveIn, user: dict = Depends(requires("issue.create
     return a *different* reading, which would be confusing on screen.
     """
     return {
-        **_lot_lookup(payload.item_code, payload.ocr_receipt_date),
-        "item_match": {"decision": "lock", "item_code": payload.item_code,
+        **_lot_lookup(payload.item_id, payload.ocr_receipt_date),
+        "item_match": {"decision": "lock", "item_id": payload.item_id,
                        "matched_on": "manual", "reason": None, "contenders": []},
     }
 
@@ -973,7 +1020,7 @@ def create_scan(payload: ScanIn, user: dict = Depends(requires("issue.create")))
     caller did not do anything wrong, and the record exists either way.
     """
     with transaction() as conn:
-        candidates = _candidates(conn, payload.item_code)
+        candidates = _candidates(conn, payload.item_id)
 
         if payload.lot_id is None:
             scan_id = _insert_scan(conn, payload, status="blocked_unreadable", lot_id=None,
@@ -1011,11 +1058,11 @@ def create_scan(payload: ScanIn, user: dict = Depends(requires("issue.create")))
 def _insert_scan(conn, payload: ScanIn, *, status: str, lot_id: int | None,
                  fifo_expected: tuple[int | None, str | None], user: dict) -> int:
     cursor = conn.execute(
-        "INSERT INTO material_usage_scan (item_code, lot_id, status, captured_at, captured_by,"
+        "INSERT INTO material_usage_scan (item_id, lot_id, status, captured_at, captured_by,"
         " image_path, ocr_receipt_date, ocr_confidence, ocr_notes, match_distance,"
         " fifo_expected_lot_id, fifo_expected_date, field_values, detail_pending, created_at)"
         " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (payload.item_code, lot_id, status, now(), user["name"], payload.image_path,
+        (payload.item_id, lot_id, status, now(), user["name"], payload.image_path,
          payload.ocr_receipt_date, payload.ocr_confidence, payload.ocr_notes, payload.match_distance,
          fifo_expected[0], fifo_expected[1], json.dumps(payload.fields, ensure_ascii=False),
          int(payload.detail_pending), now()),
@@ -1027,17 +1074,22 @@ def _insert_scan(conn, payload: ScanIn, *, status: str, lot_id: int | None,
 def scans(status: str | None = None, limit: int = 100,
           user: dict = Depends(current_user)) -> list[dict]:
     with transaction() as conn:
-        sql = ("SELECT s.*, l.receipt_date, l.manufacture_date, i.name AS item_name"
+        sql = ("SELECT s.*, l.receipt_date, l.manufacture_date,"
+               " i.name AS item_name, i.model AS item_model"
                " FROM material_usage_scan s"
                " LEFT JOIN inventory_lot l ON l.id = s.lot_id"
-               " LEFT JOIN inventory_item i ON i.item_code = s.item_code")
+               " LEFT JOIN inventory_item i ON i.id = s.item_id")
         params: tuple = ()
         if status:
             sql += " WHERE s.status = ?"
             params = (status,)
         sql += " ORDER BY s.id DESC LIMIT ?"
         rows = conn.execute(sql, (*params, limit)).fetchall()
-    return [{**dict(r), "field_values": json.loads(r["field_values"] or "{}")} for r in rows]
+    return [
+        {**dict(r), "field_values": json.loads(r["field_values"] or "{}"),
+         "item_label": r["item_model"] or r["item_name"]}
+        for r in rows
+    ]
 
 
 @app.post("/api/scans/{scan_id}/override")
@@ -1119,7 +1171,7 @@ def alerts(user: dict = Depends(current_user)) -> dict:
     with transaction() as conn:
         for row in conn.execute(
             "SELECT l.*, i.name, i.shelf_life_days FROM inventory_lot l"
-            " JOIN inventory_item i ON i.item_code = l.item_code"
+            " JOIN inventory_item i ON i.id = l.item_id"
             " WHERE l.qty_on_hand > 0 AND COALESCE(l.verdict, '合格') <> '不合格'"
         ).fetchall():
             lot = dict(row)
@@ -1143,22 +1195,23 @@ def alerts(user: dict = Depends(current_user)) -> dict:
                 out["stale"].append({**lot, "age_days": age})
 
         for row in conn.execute(
-            "SELECT i.item_code, i.name, i.safety_stock, COALESCE(SUM(l.qty_on_hand), 0) AS on_hand"
-            " FROM inventory_item i LEFT JOIN inventory_lot l ON l.item_code = i.item_code"
+            "SELECT i.id, i.name, i.model, i.safety_stock, COALESCE(SUM(l.qty_on_hand), 0) AS on_hand"
+            " FROM inventory_item i LEFT JOIN inventory_lot l ON l.item_id = i.id"
             "   AND COALESCE(l.verdict, '合格') <> '不合格'"
-            " WHERE i.safety_stock > 0 GROUP BY i.item_code HAVING on_hand < i.safety_stock"
+            " WHERE i.safety_stock > 0 GROUP BY i.id HAVING on_hand < i.safety_stock"
         ).fetchall():
             out["low_stock"].append(dict(row))
 
         for row in conn.execute(
-            "SELECT l.*, i.name FROM inventory_lot l JOIN inventory_item i ON i.item_code = l.item_code"
+            "SELECT l.*, i.name, i.model FROM inventory_lot l"
+            " JOIN inventory_item i ON i.id = l.item_id"
             " WHERE l.verdict = '不合格' AND l.qty_on_hand > 0"
         ).fetchall():
             out["rejected"].append(dict(row))
 
         cutoff = (datetime.now() - timedelta(hours=pending_hours)).isoformat(timespec="seconds")
         for row in conn.execute(
-            "SELECT id, item_code, captured_at FROM material_usage_scan"
+            "SELECT id, item_id, captured_at FROM material_usage_scan"
             " WHERE detail_pending = 1 AND status IN ('posted','overridden') AND captured_at < ?",
             (cutoff,),
         ).fetchall():

@@ -34,8 +34,8 @@ const { Title, Text } = Typography;
 const TOUCH = 64;
 
 const ITEM_DEFER_COPY: Record<string, string> = {
-  no_code_read: "標籤上的料號讀不出來",
-  no_item_match: "標籤上的料號不在品項主檔裡",
+  no_code_read: "標籤上的型號讀不出來",
+  no_item_match: "讀到的型號不在品項主檔裡，或這個品項本來就沒有型號",
   ambiguous_item: "標籤同時對到多個型號，無法確定是哪一個",
 };
 
@@ -75,11 +75,11 @@ export default function IssuePage() {
     }
   }
 
-  async function pickItem(itemCode: string) {
+  async function pickItem(itemId: number) {
     if (!proposal) return;
     setBusy(true);
     try {
-      const patch = await api.resolveItem(itemCode, proposal.recognition.receipt_date);
+      const patch = await api.resolveItem(itemId, proposal.recognition.receipt_date);
       const next = { ...proposal, ...patch } as Proposal;
       setProposal(next);
       setChosenLot(next.locked_lot?.lot_id);
@@ -91,13 +91,13 @@ export default function IssuePage() {
   }
 
   async function submit() {
-    if (!proposal?.item_code) return;
+    if (!proposal?.item_id) return;
     const fields = await form.validateFields().catch(() => null);
     if (!fields) return;
     setBusy(true);
     try {
       const res = await api.createScan({
-        item_code: proposal.item_code,
+        item_id: proposal.item_id,
         lot_id: chosenLot ?? null,
         image_path: proposal.image_path,
         ocr_receipt_date: proposal.recognition.receipt_date,
@@ -124,7 +124,7 @@ export default function IssuePage() {
 
   if (verdict) return <VerdictBlock verdict={verdict} onNext={reset} />;
 
-  const itemDeferred = proposal && !proposal.item_code;
+  const itemDeferred = proposal && !proposal.item_id;
 
   return (
     <>
@@ -189,9 +189,9 @@ export default function IssuePage() {
                   <>
                     <Alert
                       type="warning"
-                      title="辨識不出是哪個型號，請自己選"
+                      title="辨識不出是哪個品項，請自己選"
                       description={
-                        (ITEM_DEFER_COPY[proposal.item_match.reason ?? ""] ?? "無法判定型號") +
+                        (ITEM_DEFER_COPY[proposal.item_match.reason ?? ""] ?? "無法判定品項") +
                         (proposal.item_match.contenders.length
                           ? `（可能是：${proposal.item_match.contenders.join("、")}）`
                           : "")
@@ -201,25 +201,28 @@ export default function IssuePage() {
                     <Select
                       size="large"
                       style={{ width: "100%", height: TOUCH }}
-                      placeholder="選型號"
+                      placeholder="選品項"
                       loading={busy}
+                      optionFilterProp="label"
+                      showSearch
                       onChange={pickItem}
                       options={proposal.catalogue.map((c) => ({
-                        value: c.item_code,
-                        label: `${c.item_code}｜${c.name}（在庫 ${c.on_hand}）`,
+                        value: c.id,
+                        label: `${c.label}｜${c.name}${c.spec ? ` ${c.spec}` : ""}（在庫 ${c.on_hand}）`,
                         disabled: c.on_hand === 0,
                       }))}
                     />
                     <Text type="secondary" style={{ display: "block", marginTop: 8 }}>
-                      在庫 0 的型號不能選 —— 沒有批次可以領。
+                      在庫 0 的品項不能選 —— 沒有批次可以領。沒有型號的品項（例：脫氧劑）
+                      本來就只能這樣選，不是辨識失敗。
                     </Text>
                   </>
                 ) : (
                   <>
                     <div style={{ marginBottom: 16 }}>
-                      <Text type="secondary">型號</Text>
+                      <Text type="secondary">品項</Text>
                       <div>
-                        <Text strong style={{ fontSize: 28 }}>{proposal.item_code}</Text>{" "}
+                        <Text strong style={{ fontSize: 28 }}>{proposal.item_label}</Text>{" "}
                         <Text style={{ fontSize: 18 }}>{proposal.item_name}</Text>{" "}
                         <Tag color={proposal.item_match.matched_on === "manual" ? "orange" : "blue"}>
                           {proposal.item_match.matched_on === "manual" ? "人工指定" : "影像判定"}
@@ -277,7 +280,7 @@ export default function IssuePage() {
                     {!proposal.candidates.length && (
                       <Empty
                         image={Empty.PRESENTED_IMAGE_SIMPLE}
-                        description={`${proposal.item_code} 沒有可領用的在庫批次`}
+                        description={`${proposal.item_label} 沒有可領用的在庫批次`}
                       >
                         <Link href="/">
                           <Button type="primary" icon={<InboxOutlined />}>去收貨建批</Button>

@@ -21,10 +21,21 @@ from typing import Protocol
 _SYSTEM_PROMPT = """\
 You read labels off boxes of food-packaging film in a Taiwanese factory.
 
+You are reading three things: 型號 (model code), 製造日期 (manufacture date),
+and 進貨日期 (receipt date).
+
 A box carries up to three things you care about:
-1. A printed supplier label (English and/or Chinese) with an item code and a
-   manufacture date. Formats seen in the field: `2003.T7320BC-340X900-P1`,
-   `2025年09月26日`, `26-Sep-25`.
+1. A printed supplier label (English and/or Chinese) with a code and a
+   manufacture date. The code appears in two forms and BOTH matter:
+   - 型號 (model code): a short alphanumeric code such as `T6284BA`, `T7320BC`,
+     `T6050BSW`, sometimes with a suffix like `-P1` or `-P6`. This is what the
+     warehouse writes on its forms and is the primary thing to report.
+   - The full supplier part number it is often embedded in, such as
+     `2003.T7320BC-340X900-P1`.
+   Report the 型號 in `model_code`, and the full string in `full_code` when one
+   is present. If you can only see one of them, fill that one and leave the
+   other null.
+   Date formats seen in the field: `2025年09月26日`, `26-Sep-25`, `25.03.21`.
 2. A hand-stamped red rubber stamp applied by the warehouse on acceptance,
    carrying the company name and a RECEIPT DATE, e.g. `2026-08-12`. This stamp
    is usually on the side of the box. It is often faint, crooked, smudged, or
@@ -46,13 +57,23 @@ Transcribe dates exactly as printed or stamped, including the original format.
 Do not reformat them.
 """
 
-_USER_PROMPT = "Read this box label. Return null for anything you cannot read."
+_USER_PROMPT = (
+    "Read this box label: 型號 (model code), 製造日期 (manufacture date), and "
+    "進貨日期 (the red acceptance stamp). Return null for anything you cannot read."
+)
 
 
 @dataclass
 class Recognition:
-    """What one recognition attempt produced."""
+    """What one recognition attempt produced.
 
+    `model_code` is the 型號 the warehouse works in; `item_code` keeps the full
+    supplier part number when the label carries one. Both feed the item matcher,
+    which tries an exact match on the full code first and falls back to finding
+    a 型號 inside the string.
+    """
+
+    model_code: str | None = None
     item_code: str | None = None
     manufacture_date: str | None = None
     receipt_date: str | None = None
@@ -93,7 +114,8 @@ class ClaudeProvider:
         from pydantic import BaseModel, Field
 
         class LabelReading(BaseModel):
-            item_code: str | None = Field(description="Item code exactly as printed, or null")
+            model_code: str | None = Field(description="型號 / model code such as T6284BA, or null")
+            item_code: str | None = Field(description="Full supplier part number if present, or null")
             manufacture_date: str | None = Field(description="Manufacture date in its original format, or null")
             receipt_date: str | None = Field(description="Receipt date from the red acceptance stamp, original format, or null")
             item_code_confidence: float = Field(ge=0.0, le=1.0)
@@ -139,6 +161,7 @@ class ClaudeProvider:
             return Recognition(error="empty_parsed_output")
 
         return Recognition(
+            model_code=parsed.model_code,
             item_code=parsed.item_code,
             manufacture_date=parsed.manufacture_date,
             receipt_date=parsed.receipt_date,
@@ -185,7 +208,8 @@ class GeminiProvider:
         from pydantic import BaseModel, Field
 
         class LabelReading(BaseModel):
-            item_code: str | None = Field(default=None, description="Item code exactly as printed, or null")
+            model_code: str | None = Field(default=None, description="型號 / model code such as T6284BA, or null")
+            item_code: str | None = Field(default=None, description="Full supplier part number if present, or null")
             manufacture_date: str | None = Field(default=None, description="Manufacture date in its original format, or null")
             receipt_date: str | None = Field(default=None, description="Receipt date from the red acceptance stamp, original format, or null")
             item_code_confidence: float = Field(default=0.0, ge=0.0, le=1.0)
@@ -241,6 +265,7 @@ class GeminiProvider:
 
         usage = getattr(response, "usage_metadata", None)
         return Recognition(
+            model_code=parsed.model_code,
             item_code=parsed.item_code,
             manufacture_date=parsed.manufacture_date,
             receipt_date=parsed.receipt_date,
