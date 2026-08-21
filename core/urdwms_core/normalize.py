@@ -60,6 +60,24 @@ _YMD_LOOSE = re.compile(
     r"([0-9OoDQlI|iZzSsbGBgq]{4})[\s\-/.]([0-9A-Za-z|]{1,2})[\s\-/.]([0-9A-Za-z|]{1,2})(?![0-9A-Za-z|])"
 )
 
+# `22.03.2026`, `22/03/2026` — day first, four-digit year last.
+#
+# This is what Sealed Air prints in the `Date:` field, and the format the whole
+# FIFO key was silently failing on: the year-first pattern above needs four
+# digits up front, so `22.03.2026` fell through to the bare-digits fallback and
+# became the key `22032026` — DDMMYYYY sitting in YYYYMMDD positions. A lot
+# received as `2026-03-22` keys to `20260322`, so the same day could never match
+# itself, and every box from this supplier deferred to manual selection.
+#
+# Day-first is an assumption, and it is only safe to make it silently when the
+# first field cannot be a month. `22.03.2026` is unambiguous; `03.04.2026` is
+# not, and guessing there would turn "could not read it" into "read it
+# confidently, wrong" — the exact trade this module refuses elsewhere. So the
+# ambiguous case still yields a key (built day-first, since that is this
+# label's format) but no `iso`: it can be matched against the closed candidate
+# set, and cannot be stored as a fact.
+_DMY_NUMERIC = re.compile(r"(\d{1,2})[\-/.](\d{1,2})[\-/.](\d{4})(?![0-9])")
+
 _SEPARATORS = re.compile(r"[\s\-/.年月日]+")
 
 
@@ -127,6 +145,13 @@ def to_date_key(raw: str | None) -> DateKey | None:
             day, year = match.group(1), _expand_year(match.group(3))
             month = f"{month_num:02d}"
             return DateKey(f"{year}{month}{day.zfill(2)}", _iso_if_valid(year, month, day.zfill(2)), text)
+
+    if match := _DMY_NUMERIC.search(text):
+        day, month, year = match.group(1).zfill(2), match.group(2).zfill(2), match.group(3)
+        # Only claim a real date when the first field cannot be a month.
+        unambiguous = int(match.group(1)) > 12
+        iso = _iso_if_valid(year, month, day) if unambiguous else None
+        return DateKey(f"{year}{month}{day}", iso, text)
 
     if match := _YMD_LOOSE.search(text):
         year, month, day = match.group(1), match.group(2).zfill(2), match.group(3).zfill(2)

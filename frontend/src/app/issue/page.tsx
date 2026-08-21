@@ -172,6 +172,19 @@ function IssueScreen() {
   // judgement, so warning about it would be crying wolf.
   const takingWrongLot = Boolean(chosenLot && !chosenLot.is_fifo_next && !chosenLot.fifo_also_ok);
 
+  // 照片上讀到了生產日期，但在庫沒有任何一批是那天的。
+  //
+  // 這跟「領錯順序」是兩件事：領錯順序至少領的是真的存在的批次，紀錄是對的，
+  // 只是順序要覆核。這裡是手上這箱根本不在帳上 —— 照著預選的 FIFO 批次送出，
+  // 會生出一筆指向錯誤批次的紀錄，而追溯報表事後看不出來哪裡不對。
+  // 判斷交給後端：日期格式的正規化（22.03.2026 vs 2026-03-22 是同一天）和 OCR
+  // 混淆距離都在 urdwms_core 裡，前端自己拿字串比一定會比錯 —— 那正是這個 bug
+  // 一開始的成因。
+  const photoDate = capture?.recognition.manufacture_date ?? null;
+  const photoDisagrees = Boolean(
+    photoDate && capture?.decision === "defer" && capture?.defer_reason === "no_candidate",
+  );
+
   async function runScan(source: () => Promise<Proposal>) {
     setScanning(true);
     try {
@@ -472,6 +485,33 @@ function IssueScreen() {
 
       {stage !== "拍照" && lots.length > 0 && (
         <>
+          {photoDisagrees && (
+            <Alert
+              style={{ marginTop: 24, borderColor: BAD }}
+              type="error"
+              title={`照片上的生產日期 ${photoDate} 不在這個品項的在庫批次裡`}
+              description={
+                <Space orientation="vertical" size={4}>
+                  <span style={{ fontSize: 16 }}>
+                    在庫的是：{lots.map((l) => l.manufacture_date ?? "未填").join("、")}
+                  </span>
+                  <span>
+                    手上這箱跟帳上對不起來 —— 可能是這批還沒收貨建批、型號選錯，
+                    或日期讀錯了。<strong>照著下面預選的批次送出，會生出一筆指向錯誤批次的紀錄。</strong>
+                  </span>
+                  <span>先確認是哪一種再決定：去收貨建批、重拍，或確實知道自己在做什麼才往下送。</span>
+                </Space>
+              }
+              action={
+                <Space orientation="vertical">
+                  <Button size="small" icon={<ReloadOutlined />} onClick={() => reset("拍照")}>重拍</Button>
+                  <Link href="/receiving">
+                    <Button size="small" type="primary" icon={<InboxOutlined />}>去收貨</Button>
+                  </Link>
+                </Space>
+              }
+            />
+          )}
           {/* On the recognised path the lot is already decided, so the picker
               only appears when a human has to make the call — either they came
               in manually, or the stamp could not be read. */}
