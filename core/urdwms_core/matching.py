@@ -178,37 +178,68 @@ def match_candidates(
     return MatchResult(Decision.LOCK, best.lot_id, best_distance, runner_up_distance)
 
 
-def fifo_expected(candidates: list[Candidate]) -> list[str]:
-    """Lot ids FIFO accepts: every lot sharing the earliest receipt date.
+def _sort_key(candidate: Candidate) -> tuple:
+    """FIFO orders by 製造日期 — how old the stock actually is.
 
-    This is the JUDGEMENT: same-day lots are equally legal (requirement US-3),
-    so drawing any of them passes. Use `fifo_target` for what to TELL someone to
-    take — a screen that marks two lots "應領" has said nothing.
+    Receipt date only says when it reached us, which a slow supplier or a late
+    delivery can scramble: film made in March but delivered in August is older
+    stock than film made in July and delivered in June. Shipping by arrival
+    order would leave the genuinely older film sitting.
+
+    A lot with no manufacture date sorts LAST, not first. Unknown age must not
+    jump ahead of known age — pointing at an undated lot over one that is
+    provably old would be worse than the paper process this replaces. Receipt
+    date breaks ties, then lot id so the order is stable.
+    """
+    return (
+        candidate.manufacture_date is None,
+        candidate.manufacture_date or "",
+        candidate.receipt_date,
+        candidate.lot_id,
+    )
+
+
+def fifo_expected(candidates: list[Candidate]) -> list[str]:
+    """Lot ids FIFO accepts: every lot sharing the earliest 製造日期.
+
+    This is the JUDGEMENT: lots made the same day are equally legal, so drawing
+    any of them passes. Use `fifo_target` for what to TELL someone to take — a
+    screen marking two lots "應領" has said nothing.
+
+    With no manufacture date anywhere, this falls back to earliest receipt date:
+    a shelf of undated stock would otherwise get no guidance at all, which is
+    worse than guidance from a weaker signal.
     """
     if not candidates:
         return []
-    earliest = min(c.receipt_date for c in candidates)
-    return [c.lot_id for c in candidates if c.receipt_date == earliest]
+    dated = [c for c in candidates if c.manufacture_date]
+    if not dated:
+        earliest_receipt = min(c.receipt_date for c in candidates)
+        return [c.lot_id for c in candidates if c.receipt_date == earliest_receipt]
+    earliest = min(c.manufacture_date for c in dated if c.manufacture_date)
+    return [c.lot_id for c in dated if c.manufacture_date == earliest]
 
 
 def fifo_target(candidates: list[Candidate]) -> str | None:
-    """The single lot to point at: earliest receipt date, then earliest manufacture date.
+    """The single lot to point at: earliest 製造日期, then earliest 進貨日期.
 
-    Guidance and judgement are deliberately different here. Judgement stays
-    permissive because refusing a same-day lot would block a draw that is
+    Guidance and judgement are deliberately different. Judgement stays
+    permissive because refusing a same-age lot would block a draw that is
     genuinely fine; guidance has to name one box, because "take either of these
     two" is not an instruction anyone can act on while holding a roll of film.
-
-    Ties break on manufacture date because between two lots received together,
-    the older stock is the one that should move first. A missing manufacture
-    date sorts last: unknown age should not jump the queue ahead of a lot whose
-    age is known.
     """
     accepted = set(fifo_expected(candidates))
     if not accepted:
         return None
     pool = [c for c in candidates if c.lot_id in accepted]
-    return min(
-        pool,
-        key=lambda c: (c.manufacture_date is None, c.manufacture_date or "", c.lot_id),
-    ).lot_id
+    return min(pool, key=_sort_key).lot_id
+
+
+def fifo_basis(candidates: list[Candidate]) -> str:
+    """Which field the current guidance actually rests on.
+
+    Shown on screen: guidance derived from receipt date because nothing carries
+    a manufacture date is a weaker claim, and saying so is the difference
+    between a stated fallback and a silent downgrade.
+    """
+    return "製造日期" if any(c.manufacture_date for c in candidates) else "進貨日期"

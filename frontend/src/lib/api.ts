@@ -38,8 +38,10 @@ export type Lot = {
   qty_on_hand: number;
   /** FIFO 指引：唯一該領的那一批 */
   is_fifo_next: boolean;
-  /** 同進貨日的其他批：領了也合法，只是指引沒指它 */
+  /** 同製造日的其他批：領了也合法，只是指引沒指它 */
   fifo_also_ok: boolean;
+  /** FIFO 依據哪個欄位排序。全部沒填製造日時會退回進貨日 */
+  fifo_basis: "製造日期" | "進貨日期";
 };
 
 export type Item = {

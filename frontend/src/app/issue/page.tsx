@@ -308,7 +308,7 @@ function IssueScreen() {
 
       {lots.length > 0 && (
         <>
-          <Card title="2. 選批次（進貨日／製造日）" style={{ marginTop: 24 }}>
+          <Card title="2. 選批次（先進先出看製造日）" style={{ marginTop: 24 }}>
             <Radio.Group
               value={lotId}
               onChange={(e) => setLotId(e.target.value)}
@@ -327,8 +327,12 @@ function IssueScreen() {
                     }}
                   >
                     <Space wrap>
-                      <span style={{ fontSize: 18 }}>進貨 {lot.receipt_date}</span>
-                      <span style={{ fontSize: 18 }}>製造 {lot.manufacture_date ?? "—"}</span>
+                      {/* Manufacture date leads: it is what FIFO sorts on, so it
+                          is what someone should be reading off the box. */}
+                      <span style={{ fontSize: 18, fontWeight: 600 }}>
+                        製造 {lot.manufacture_date ?? "未填"}
+                      </span>
+                      <Text type="secondary">進貨 {lot.receipt_date}</Text>
                       {lot.effective_expiry && (
                         <Text type={lot.days_left != null && lot.days_left <= 90 ? "danger" : "secondary"}>
                           有效 {lot.effective_expiry}
@@ -338,8 +342,8 @@ function IssueScreen() {
                       <Text type="secondary">在庫 {lot.qty_on_hand} 箱</Text>
                       {lot.is_fifo_next && <Tag color="green">FIFO 應領</Tag>}
                       {lot.fifo_also_ok && (
-                        <Tooltip title="跟應領那批同一個進貨日，領這批也合法，不會被擋">
-                          <Tag>同進貨日．可領</Tag>
+                        <Tooltip title="跟應領那批同一個製造日，領這批也合法，不會被擋">
+                          <Tag>同製造日．可領</Tag>
                         </Tooltip>
                       )}
                     </Space>
@@ -348,12 +352,24 @@ function IssueScreen() {
               </Space>
             </Radio.Group>
 
+            {lots.length > 0 && lots[0].fifo_basis === "進貨日期" && (
+              <Alert
+                style={{ marginTop: 16 }}
+                type="warning"
+                title="這個品項的批次都沒填製造日期，暫時改用進貨日排序"
+                description="先進先出看的是製造日期。沒有製造日就只能退而求其次用進貨日 —— 補上製造日期後排序才會準。"
+              />
+            )}
+
             {takingWrongLot && (
               <Alert
                 style={{ marginTop: 16 }}
                 type="warning"
                 title="這不是 FIFO 應領的那批"
-                description={`應領用進貨日 ${fifoLot?.receipt_date} 那批。仍然可以送出 —— 系統會記錄下來並擋住扣帳，等主管覆核。`}
+                description={
+                  `應領用製造日 ${fifoLot?.manufacture_date ?? fifoLot?.receipt_date} 那批`
+                  + `（進貨 ${fifoLot?.receipt_date}）。仍然可以送出 —— 系統會記錄下來並擋住扣帳，等主管覆核。`
+                }
               />
             )}
           </Card>
@@ -439,7 +455,7 @@ function IssueScreen() {
               </Button>
               <Text type="secondary" style={{ display: "block", marginTop: 12, textAlign: "center" }}>
                 {selected && chosenLot
-                  ? `領用 ${selected.label} ${qty} 箱｜進貨 ${chosenLot.receipt_date}｜製造 ${chosenLot.manufacture_date ?? "—"}`
+                  ? `領用 ${selected.label} ${qty} 箱｜製造 ${chosenLot.manufacture_date ?? "未填"}｜進貨 ${chosenLot.receipt_date}`
                   : "選好品項與批次就可以送出"}
               </Text>
             </Form>
@@ -472,7 +488,7 @@ function VerdictBlock({ verdict, onNext }: { verdict: NonNullable<Verdict>; onNe
       <Title level={1} style={{ color: "#fff", margin: 0, fontSize: 48 }}>{heading}</Title>
       {blocked && (
         <Title level={3} style={{ color: "#fff", marginTop: 16, fontWeight: 400 }}>
-          應領用：進貨日 {verdict.expected} 那批
+          應領用：製造日 {verdict.expected} 那批
         </Title>
       )}
       <Text style={{ color: "#fff", fontSize: 18, marginTop: 24, opacity: 0.9 }}>

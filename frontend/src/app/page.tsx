@@ -177,8 +177,8 @@ export default function StockPage() {
                           {v}
                           {row.is_fifo_next && <Tag color="green">FIFO 應領</Tag>}
                           {row.fifo_also_ok && (
-                            <Tooltip title="跟應領那批同一個進貨日，領這批也合法">
-                              <Tag>同進貨日．可領</Tag>
+                            <Tooltip title="跟應領那批同一個製造日，領這批也合法">
+                              <Tag>同製造日．可領</Tag>
                             </Tooltip>
                           )}
                         </Space>
@@ -278,16 +278,22 @@ export default function StockPage() {
               render: (v: number) => (v > 0 ? `${v} 批` : <Text type="secondary">—</Text>),
             },
             {
-              // The point of the whole screen: not just how much, but which box next.
-              title: "下一個該領", width: 170,
+              // The point of the whole screen: not just how much, but which box
+              // next — and by the same rule the issuing screen enforces.
+              title: "下一個該領", width: 190,
               render: (_, item: Item) => {
                 const drawable = (lotsByItem.get(item.id) ?? [])
                   .filter((l) => l.qty_on_hand > 0 && l.verdict !== "不合格");
                 if (!drawable.length) return <Text type="secondary">無可領批次</Text>;
-                const next = drawable.reduce((a, b) => (a.receipt_date <= b.receipt_date ? a : b));
+                const next = drawable.find((l) => l.is_fifo_next) ?? drawable[0];
                 return (
-                  <Space>
-                    <Tag color="green">進貨 {next.receipt_date}</Tag>
+                  <Space size={4} wrap>
+                    <Tag color="green">製造 {next.manufacture_date ?? next.receipt_date}</Tag>
+                    {next.fifo_basis === "進貨日期" && (
+                      <Tooltip title="這個品項沒有批次填製造日期，暫時用進貨日排序">
+                        <Tag color="orange">依進貨日</Tag>
+                      </Tooltip>
+                    )}
                     {drawable.length > 1 && <Text type="secondary">共 {drawable.length} 批</Text>}
                   </Space>
                 );

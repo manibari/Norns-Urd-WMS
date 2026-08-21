@@ -7,7 +7,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "core"))
 
 from urdwms_core.matching import (
-    Candidate, DeferReason, fifo_expected, fifo_target, match_candidates,
+    Candidate, DeferReason, fifo_basis, fifo_expected, fifo_target, match_candidates,
 )
 from urdwms_core.normalize import to_date_key
 
@@ -61,47 +61,59 @@ class Matching(unittest.TestCase):
 
 
 class Fifo(unittest.TestCase):
-    def test_earliest_receipt_date_wins(self):
-        self.assertEqual(fifo_expected(STOCK), ["L3"])
+    """FIFO orders by 製造日期 — actual stock age, not arrival order."""
 
-    def test_same_day_lots_are_equally_legal(self):
-        same_day = STOCK + [Candidate("L4", "2026-04-10")]
-        self.assertEqual(sorted(fifo_expected(same_day)), ["L3", "L4"])
+    # Deliberately scrambled: the oldest film arrived last.
+    STOCK = [
+        Candidate("new", "2026-03-10", "2026-01-20"),
+        Candidate("old", "2026-08-12", "2025-06-15"),
+        Candidate("mid", "2026-05-12", "2025-11-30"),
+    ]
+
+    def test_earliest_manufacture_date_wins_not_earliest_receipt(self):
+        # "old" arrived most recently but was made first, so it goes first.
+        self.assertEqual(fifo_expected(self.STOCK), ["old"])
+        self.assertEqual(fifo_target(self.STOCK), "old")
+
+    def test_lots_made_the_same_day_are_equally_legal(self):
+        same_day = [
+            Candidate("a", "2026-04-10", "2025-09-26"),
+            Candidate("b", "2026-07-01", "2025-09-26"),
+        ]
+        self.assertEqual(sorted(fifo_expected(same_day)), ["a", "b"])
+
+    def test_same_manufacture_date_breaks_on_receipt_date(self):
+        same_day = [
+            Candidate("later", "2026-07-01", "2025-09-26"),
+            Candidate("earlier", "2026-04-10", "2025-09-26"),
+        ]
+        self.assertEqual(fifo_target(same_day), "earlier")
+
+    def test_undated_stock_does_not_jump_the_queue(self):
+        # Pointing at a lot nobody can date, over one provably older, would be
+        # worse than the paper process this replaces.
+        mixed = [
+            Candidate("undated", "2026-01-01", None),
+            Candidate("dated", "2026-08-01", "2025-12-01"),
+        ]
+        self.assertEqual(fifo_expected(mixed), ["dated"])
+        self.assertEqual(fifo_target(mixed), "dated")
+
+    def test_falls_back_to_receipt_date_when_nothing_is_dated(self):
+        # Otherwise a shelf of undated stock would have no guidance at all.
+        undated = [
+            Candidate("later", "2026-08-01", None),
+            Candidate("earlier", "2026-02-01", None),
+        ]
+        self.assertEqual(fifo_expected(undated), ["earlier"])
+        self.assertEqual(fifo_target(undated), "earlier")
+
+    def test_basis_reports_which_field_guidance_rests_on(self):
+        self.assertEqual(fifo_basis(self.STOCK), "製造日期")
+        self.assertEqual(fifo_basis([Candidate("x", "2026-01-01", None)]), "進貨日期")
 
     def test_no_stock(self):
         self.assertEqual(fifo_expected([]), [])
-
-
-class FifoTarget(unittest.TestCase):
-    """Guidance names exactly one lot, even where judgement accepts several."""
-
-    def test_points_at_the_single_earliest(self):
-        self.assertEqual(fifo_target(STOCK), "L3")
-
-    def test_same_day_breaks_on_manufacture_date(self):
-        # Both are legal to draw, but the screen must name one — the older stock.
-        same_day = [
-            Candidate("A", "2026-04-10", "2025-09-26"),
-            Candidate("B", "2026-04-10", "2025-08-19"),
-        ]
-        self.assertEqual(sorted(fifo_expected(same_day)), ["A", "B"])
-        self.assertEqual(fifo_target(same_day), "B")
-
-    def test_unknown_manufacture_date_does_not_jump_the_queue(self):
-        same_day = [
-            Candidate("A", "2026-04-10", None),
-            Candidate("B", "2026-04-10", "2025-09-26"),
-        ]
-        self.assertEqual(fifo_target(same_day), "B")
-
-    def test_fully_tied_falls_back_to_lot_id_for_stability(self):
-        same_day = [
-            Candidate("B", "2026-04-10", "2025-09-26"),
-            Candidate("A", "2026-04-10", "2025-09-26"),
-        ]
-        self.assertEqual(fifo_target(same_day), "A")
-
-    def test_no_stock(self):
         self.assertIsNone(fifo_target([]))
 
 

@@ -334,7 +334,7 @@ export default function ReceivingPage() {
                 <Form.Item
                   name="receipt_date" label="進貨日期"
                   rules={[{ required: true, message: "請填進貨日期" }]}
-                  extra={enteredCount > 0 ? "沿用上一批（單上的〃）" : "FIFO 就是照這個排序"}
+                  extra={enteredCount > 0 ? "沿用上一批（單上的〃）" : "到貨那天"}
                 >
                   <DatePicker style={{ width: "100%" }} disabledDate={(d) => d.isAfter(dayjs(), "day")} />
                 </Form.Item>
@@ -461,7 +461,7 @@ export default function ReceivingPage() {
                 </Space>
               </InspectionRow>
 
-              <InspectionRow n={2} label="製造日期" hint="同進貨日時，用來決定哪一批先領">
+              <InspectionRow n={2} label="製造日期" hint="先進先出就是照這個排序 —— 不填的話這批會被排到最後">
                 <Form.Item name="manufacture_date" noStyle>
                   <DatePicker style={{ width: 220 }} placeholder="選日期" />
                 </Form.Item>

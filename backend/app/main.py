@@ -25,7 +25,7 @@ sys.path.insert(0, str(ROOT / "core"))
 
 from urdwms_core.camera import CameraConfig, CameraError, capture as camera_capture  # noqa: E402
 from urdwms_core.matching import (  # noqa: E402
-    Candidate, fifo_expected, fifo_target, match_candidates, match_item_code,
+    Candidate, fifo_basis, fifo_expected, fifo_target, match_candidates, match_item_code,
 )
 from urdwms_core.normalize import normalize_item_code, to_date_key  # noqa: E402
 from urdwms_core.recognition import GeminiProvider, Recognition  # noqa: E402
@@ -70,12 +70,17 @@ def _candidates(conn, item_id: int) -> list[Candidate]:
 
 
 def _fifo_verdict(candidates: list[Candidate], lot_id: str) -> tuple[bool, str | None]:
-    """FIFO compares receipt dates, so lots received the same day are equally legal."""
+    """FIFO compares 製造日期, so lots made the same day are equally legal.
+
+    The date returned is what the operator is told to look for, so it must be
+    the same field the judgement used — telling someone to fetch a receipt date
+    while grading them on manufacture date is how a rule stops being followed.
+    """
     expected = fifo_expected(candidates)
     if not expected:
         return False, None
-    expected_date = next(c.receipt_date for c in candidates if c.lot_id == expected[0])
-    return lot_id in expected, expected_date
+    target = next(c for c in candidates if c.lot_id == expected[0])
+    return lot_id in expected, target.manufacture_date or target.receipt_date
 
 
 # Built once and reused. Constructing a client per request meant a fresh TLS
@@ -959,6 +964,9 @@ def lots(item_id: int | None = None, user: dict = Depends(current_user)) -> list
         row["fifo_also_ok"] = (
             str(row["id"]) in fifo_expected(pool) and str(row["id"]) != fifo_target(pool)
         )
+        # Which field the guidance rests on. Falling back to receipt date
+        # because nothing is dated is a weaker claim and should look like one.
+        row["fifo_basis"] = fifo_basis(pool)
         row["inspection"] = json.loads(row.get("inspection") or "{}")
         row["draw_count"] = drawn.get(row["id"], 0)
         row["item_label"] = row["item_model"] or row["item_name"]
@@ -1342,6 +1350,7 @@ def _lot_lookup(item_id: int, read_receipt_date: str | None) -> dict:
         "defer_reason": result.reason.value if result.reason else None,
         "match_distance": result.best_distance,
         "fifo_target_lot_id": int(fifo_target(candidates)) if fifo_target(candidates) else None,
+        "fifo_basis": fifo_basis(candidates),
     }
     if not result.locked:
         return {**out, "locked_lot": None, "fifo_ok": None, "fifo_expected_date": None}
