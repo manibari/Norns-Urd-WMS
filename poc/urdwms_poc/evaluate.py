@@ -144,27 +144,44 @@ def _rates(evaluations: list[Evaluation]) -> dict:
 
 
 def summarize(evaluations: list[Evaluation]) -> dict:
-    """Overall rates plus the two stratified tables the PoC spec requires."""
+    """Overall rates plus the two stratified tables the PoC spec requires.
+
+    The three rates are computed over samples that actually carry a stamp.
+    On a face with no stamp there is nothing to read, so declining is the
+    *correct* answer, not a deferral — folding those into the defer rate would
+    penalise the system for behaving exactly as designed, and would make the
+    defer rate depend on how many stampless photos happen to be in the set.
+    Those samples are scored separately, as a refusal test.
+    """
+    readable = [e for e in evaluations if e.sample.stamp_present]
+    unreadable = [e for e in evaluations if not e.sample.stamp_present]
+
     by_bucket: dict[str, list[Evaluation]] = defaultdict(list)
     by_stratum: dict[str, list[Evaluation]] = defaultdict(list)
-    for e in evaluations:
+    for e in readable:
         by_bucket[e.sample.candidate_bucket].append(e)
         by_stratum[e.sample.stratum].append(e)
 
-    no_stamp = [e for e in evaluations if not e.sample.stamp_present]
     return {
-        "overall": _rates(evaluations),
-        "by_candidate_count": {
-            k: _rates(v) for k, v in sorted(by_bucket.items())
-        },
+        "overall": _rates(readable),
+        "by_candidate_count": {k: _rates(v) for k, v in sorted(by_bucket.items())},
         "by_stratum": {k: _rates(v) for k, v in sorted(by_stratum.items())},
         "defer_reasons": dict(Counter(
-            e.match.reason.value for e in evaluations
+            e.match.reason.value for e in readable
             if e.outcome is Outcome.DEFER and e.match.reason
         )),
-        "hallucination": {
-            "n_faces_without_stamp": len(no_stamp),
-            "invented_a_date": sum(1 for e in no_stamp if e.hallucinated_stamp),
+        "refusal_test": {
+            "n": len(unreadable),
+            "correctly_refused": sum(1 for e in unreadable if not e.hallucinated_stamp),
+            "invented_a_date": sum(1 for e in unreadable if e.hallucinated_stamp),
+            "invention_landed_on_a_real_lot": sum(
+                1 for e in unreadable if e.outcome is Outcome.FALSE_HIT
+            ),
+            "photos": [
+                {"photo_id": e.sample.photo_id, "stratum": e.sample.stratum,
+                 "read": e.recognition.receipt_date, "outcome": e.outcome.value}
+                for e in unreadable
+            ],
         },
         "recognition_errors": sum(1 for e in evaluations if e.recognition.failed),
     }
@@ -181,5 +198,5 @@ def false_hit_upper_bound(false_hits: int, n: int) -> float | None:
     if n == 0:
         return None
     if false_hits == 0:
-        return 3.0 / n
+        return min(1.0, 3.0 / n)
     return None

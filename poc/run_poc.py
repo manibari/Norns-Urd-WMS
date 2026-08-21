@@ -28,7 +28,9 @@ from urdwms_poc.evaluate import (  # noqa: E402
     Evaluation, Outcome, Sample, evaluate, false_hit_upper_bound, summarize,
 )
 from urdwms_poc.matching import Candidate  # noqa: E402
-from urdwms_poc.recognition import ClaudeProvider, Recognition, ReplayProvider  # noqa: E402
+from urdwms_poc.recognition import (  # noqa: E402
+    ClaudeProvider, GeminiProvider, Recognition, ReplayProvider,
+)
 
 PASS_CRITERIA = {"false_hit_rate": 0.005, "hit_rate": 0.80, "defer_rate": 0.20}
 
@@ -85,7 +87,7 @@ def render_report(summary: dict, thresholds: dict, evaluations: list[Evaluation]
     lines = [
         "# 辨識 PoC 結果",
         "",
-        f"模型 `{model}`｜樣本 {overall['n']} 張｜"
+        f"模型 `{model}`｜有章樣本 {overall['n']} 張（三率分母）｜"
         f"門檻 conf≥{thresholds['confidence_threshold']} "
         f"dist≤{thresholds['max_distance']} margin≥{thresholds['min_margin']}",
         "",
@@ -117,16 +119,28 @@ def render_report(summary: dict, thresholds: dict, evaluations: list[Evaluation]
             f"{'仍高於 0.5% 門檻，本 PoC 無法證明該門檻成立，需靠 US-9 上線後監測。' if bound > PASS_CRITERIA['false_hit_rate'] else ''}",
         ]
 
-    halluc = summary["hallucination"]
-    if halluc["n_faces_without_stamp"]:
+    refusal = summary["refusal_test"]
+    if refusal["n"]:
         lines += [
             "",
-            "## 幻覺直接量測（無章的箱面）",
+            "## 拒答測試（沒有章可讀的樣本）",
             "",
-            f"無章樣本 {halluc['n_faces_without_stamp']} 張，其中 **{halluc['invented_a_date']} 張模型仍回報了進貨日**。",
+            f"無章樣本 **{refusal['n']}** 張：正確回 null **{refusal['correctly_refused']}** 張，"
+            f"編了一個日期 **{refusal['invented_a_date']}** 張"
+            f"（其中 {refusal['invention_landed_on_a_real_lot']} 張編出來的值命中了在庫批次 = 誤命中）。",
             "",
-            "> 這一格量的是 requirement §2.2 要消滅的失敗模式本身：模型讀不到時傾向編一個合理值。"
-            "回 null 才是正確行為。",
+            "| 照片 | 分層 | 讀到 | 判定 |",
+            "|---|---|---|---|",
+        ]
+        lines += [
+            f"| {p['photo_id']} | {p['stratum']} | {p['read'] or '**null** ✅'} | {p['outcome']} |"
+            for p in refusal["photos"]
+        ]
+        lines += [
+            "",
+            "> 這一節量的是 requirement §2.2 要消滅的失敗模式本身：模型讀不到時傾向編一個合理值。"
+            "**回 null 才是正確行為**，所以這些樣本不計入上方三率的分母 —— "
+            "把正確拒答算成退人工，等於因為系統照設計運作而扣它分。",
         ]
 
     lines += ["", "## 按候選集大小分層", "",
@@ -184,7 +198,10 @@ def main() -> int:
     parser.add_argument("--replay", type=Path, help="score a previous run's recognitions instead of calling the API")
     parser.add_argument("--record", type=Path, help="write recognitions here for later replay")
     parser.add_argument("--out", type=Path, default=Path("poc/out"), help="output directory")
-    parser.add_argument("--model", default="claude-opus-5")
+    parser.add_argument("--provider", default="gemini", choices=["gemini", "claude"])
+    parser.add_argument("--model", default=None, help="provider default if omitted")
+    parser.add_argument("--media-resolution", default="high", choices=["low", "medium", "high"],
+                        help="gemini only; the stamp is a small region of a large photo")
     parser.add_argument("--no-thinking", action="store_true", help="A/B whether adaptive thinking helps on faint stamps")
     parser.add_argument("--effort", default="high", choices=["low", "medium", "high", "xhigh", "max"])
     parser.add_argument("--confidence-threshold", type=float, default=0.0)
@@ -206,13 +223,25 @@ def main() -> int:
         if not args.images:
             print("--images is required unless --replay is given", file=sys.stderr)
             return 1
-        if not (os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN")
-                or Path.home().joinpath(".config/anthropic").exists()):
-            print("no Anthropic credentials found: set ANTHROPIC_API_KEY or run `ant auth login`", file=sys.stderr)
+        try:
+            if args.provider == "gemini":
+                model = args.model or "gemini-pro-latest"
+                provider = GeminiProvider(
+                    model=model,
+                    thinking=not args.no_thinking,
+                    media_resolution=args.media_resolution,
+                )
+                detail = f"media_resolution={args.media_resolution}"
+            else:
+                model = args.model or "claude-opus-5"
+                provider = ClaudeProvider(model=model, thinking=not args.no_thinking, effort=args.effort)
+                detail = f"effort={args.effort}"
+        except RuntimeError as exc:
+            print(str(exc), file=sys.stderr)
             return 2
-        provider = ClaudeProvider(model=args.model, thinking=not args.no_thinking, effort=args.effort)
-        print(f"recognising {len(samples)} photos with {args.model}"
-              f" (thinking={'off' if args.no_thinking else 'adaptive'}, effort={args.effort})", file=sys.stderr)
+        args.model = model
+        print(f"recognising {len(samples)} photos with {model}"
+              f" (thinking={'off' if args.no_thinking else 'on'}, {detail})", file=sys.stderr)
         readings = recognize_all(samples, args.images, provider)
         if args.record:
             args.record.parent.mkdir(parents=True, exist_ok=True)
@@ -232,14 +261,14 @@ def main() -> int:
 
     args.out.mkdir(parents=True, exist_ok=True)
     (args.out / "summary.json").write_text(
-        json.dumps({"thresholds": thresholds, "model": args.model, **summary}, ensure_ascii=False, indent=2),
+        json.dumps({"thresholds": thresholds, "model": args.model or "replay", **summary}, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
     with (args.out / "results.csv").open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=list(evaluations[0].row().keys()))
         writer.writeheader()
         writer.writerows(e.row() for e in evaluations)
-    report = render_report(summary, thresholds, evaluations, args.model)
+    report = render_report(summary, thresholds, evaluations, args.model or "replay")
     (args.out / "report.md").write_text(report, encoding="utf-8")
 
     if args.sweep:

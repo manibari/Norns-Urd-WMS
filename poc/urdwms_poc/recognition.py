@@ -154,6 +154,108 @@ class ClaudeProvider:
         )
 
 
+class GeminiProvider:
+    """Recognition via Google Gemini.
+
+    Same contract as ClaudeProvider — the boundary is the point (M7
+    architecture: the recognition service must not leak vendor SDK types, so
+    swapping vendors changes only this class).
+
+    Two knobs matter for this task specifically:
+
+    media_resolution  the acceptance stamp is a small, low-contrast region of a
+                      large photo. Downsampling is the difference between
+                      reading it and inventing it, so this defaults to HIGH.
+    thinking_level    a smudged stamp rewards deliberation. Worth A/B-ing, since
+                      it also costs latency on a factory floor.
+    """
+
+    def __init__(
+        self,
+        model: str = "gemini-pro-latest",
+        *,
+        thinking: bool = True,
+        media_resolution: str = "high",
+        api_key: str | None = None,
+    ) -> None:
+        import os
+
+        from google import genai
+        from google.genai import types
+        from pydantic import BaseModel, Field
+
+        class LabelReading(BaseModel):
+            item_code: str | None = Field(default=None, description="Item code exactly as printed, or null")
+            manufacture_date: str | None = Field(default=None, description="Manufacture date in its original format, or null")
+            receipt_date: str | None = Field(default=None, description="Receipt date from the red acceptance stamp, original format, or null")
+            item_code_confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+            manufacture_date_confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+            receipt_date_confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+            stamp_visible: bool = Field(default=False, description="Whether a red acceptance stamp is visible at all")
+            notes: str = Field(default="", description="What made this hard to read, if anything")
+
+        key = api_key or os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+        if not key:
+            raise RuntimeError("set GEMINI_API_KEY (or pass api_key=)")
+
+        self._types = types
+        self._client = genai.Client(api_key=key)
+        self._schema = LabelReading
+        self._model = model
+        self._resolution = {
+            "low": types.MediaResolution.MEDIA_RESOLUTION_LOW,
+            "medium": types.MediaResolution.MEDIA_RESOLUTION_MEDIUM,
+            "high": types.MediaResolution.MEDIA_RESOLUTION_HIGH,
+        }[media_resolution]
+        self._thinking = thinking
+
+    def recognize(self, image_path: Path) -> Recognition:
+        types = self._types
+        media_type, _ = _encode(image_path)
+
+        config = types.GenerateContentConfig(
+            system_instruction=_SYSTEM_PROMPT,
+            response_mime_type="application/json",
+            response_schema=self._schema,
+            media_resolution=self._resolution,
+            temperature=0.0,
+        )
+        if self._thinking:
+            config.thinking_config = types.ThinkingConfig(thinking_level="HIGH")
+
+        try:
+            response = self._client.models.generate_content(
+                model=self._model,
+                contents=[
+                    types.Part.from_bytes(data=image_path.read_bytes(), mime_type=media_type),
+                    _USER_PROMPT,
+                ],
+                config=config,
+            )
+        except Exception as exc:  # noqa: BLE001 — a provider outage must not stop the run
+            return Recognition(error=f"{type(exc).__name__}: {exc}")
+
+        parsed = response.parsed
+        if parsed is None:
+            return Recognition(error=f"unparseable_response: {(response.text or '')[:200]}")
+
+        usage = getattr(response, "usage_metadata", None)
+        return Recognition(
+            item_code=parsed.item_code,
+            manufacture_date=parsed.manufacture_date,
+            receipt_date=parsed.receipt_date,
+            item_code_confidence=parsed.item_code_confidence,
+            manufacture_date_confidence=parsed.manufacture_date_confidence,
+            receipt_date_confidence=parsed.receipt_date_confidence,
+            stamp_visible=parsed.stamp_visible,
+            notes=parsed.notes,
+            usage={
+                "input_tokens": getattr(usage, "prompt_token_count", 0) or 0,
+                "output_tokens": getattr(usage, "candidates_token_count", 0) or 0,
+            } if usage else {},
+        )
+
+
 class ReplayProvider:
     """Replays recognitions recorded by an earlier run.
 
