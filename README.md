@@ -22,6 +22,7 @@ Norns 產品線 **Urd（記錄）** 層。前身是 Norns-ERP 的 M7 模組，20
 |------|------|
 | [`docs/requirements/packaging-lot-issue-fifo.md`](docs/requirements/packaging-lot-issue-fifo.md) | **v1 需求**（12 個 user story、範圍邊界、風險、待答問題） |
 | `docs/requirements/assets/packaging-material-fifo/` | 現場實照 4 張（2026-08-20 拍攝） |
+| [`docs/poc/recognition-poc-spec.md`](docs/poc/recognition-poc-spec.md) | **辨識 PoC 規格** — v1 第一優先，排在 mockup 之前 |
 | `docs/_inherited/` | 前身 M7 的 requirement v0.2 + 系統架構（唯讀參考） |
 
 ## 狀態
