@@ -35,7 +35,7 @@ import {
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api, type Dictionary, type Item, type Lot, type Proposal } from "@/lib/api";
+import { api, StaleImage, type Dictionary, type Item, type Lot, type Proposal } from "@/lib/api";
 
 const { Title, Text } = Typography;
 
@@ -45,8 +45,11 @@ const BAD = "#ff4d4f";
 const WARN = "#faad14";
 
 type Verdict = { status: string; id: number; expected?: string } | null;
-/** 拍照 → 判定；認不出來才進手動 */
-type Stage = "拍照" | "判定" | "手動";
+/** 拍照 →（等待相機）→ 判定；認不出來才進手動 */
+type Stage = "拍照" | "等待" | "判定" | "手動";
+
+/** 等相機的輪詢間隔。相機那邊是人按快門，一秒一次夠跟得上，也不會把 stat 打爆。 */
+const POLL_MS = 1000;
 
 export default function IssuePage() {
   return (
@@ -61,6 +64,11 @@ function IssueScreen() {
   const [items, setItems] = useState<Item[]>([]);
   const [dict, setDict] = useState<Dictionary | null>(null);
   const [cameraOn, setCameraOn] = useState(false);
+  // 資料夾來源要另外認：它不是「連得到相機」，而是「等相機把圖存下來」，
+  // 拍照那一步的畫面完全不同 —— 沒有按鈕可按，只能等。
+  const [folderSource, setFolderSource] = useState(false);
+  const [waitSince, setWaitSince] = useState<number | null>(null);
+  const [lastSeen, setLastSeen] = useState<string | null>(null);
   const [stage, setStage] = useState<Stage>("拍照");
   const [itemId, setItemId] = useState<number>();
   const [lots, setLots] = useState<Lot[]>([]);
@@ -84,7 +92,10 @@ function IssueScreen() {
       if (i.status === "fulfilled") setItems(i.value);
       else message.error(`品項載入失敗：${i.reason?.message}`);
       if (d.status === "fulfilled") setDict(d.value);
-      if (c.status === "fulfilled") setCameraOn(c.value.enabled && Boolean(c.value.endpoint));
+      if (c.status === "fulfilled") {
+        setCameraOn(c.value.enabled && Boolean(c.value.endpoint));
+        setFolderSource(c.value.enabled && c.value.transport === "folder");
+      }
       // Arriving from 庫存總覽's 領用 link names the item, which is a deliberate
       // manual entry — honour it rather than demanding a photo.
       const requested = params.get("item");
@@ -117,6 +128,43 @@ function IssueScreen() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [itemId, stage]);
 
+  // 等相機：一直看資料夾裡最新那張是不是比「開始等」還新。
+  //
+  // 判準是「比按下去的時間新」而不是「五分鐘內」—— 五分鐘內也可能是上一箱的照片，
+  // 而操作員按下按鈕的那一刻，就是他宣告「接下來這張是我這箱」的時點。
+  useEffect(() => {
+    if (stage !== "等待" || waitSince == null) return;
+    let alive = true;
+    const timer = setInterval(async () => {
+      try {
+        const latest = await api.latestImage();
+        if (!alive || !latest.ok || !latest.source_time) return;
+        setLastSeen(latest.source_time);
+        if (new Date(latest.source_time).getTime() <= waitSince) return;
+        clearInterval(timer);
+        await runScan(api.captureFromCamera);
+      } catch {
+        // 輪詢失敗不打斷等待 —— 後端重啟或網路抖一下，下一秒再試就好
+      }
+    }, POLL_MS);
+    return () => { alive = false; clearInterval(timer); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stage, waitSince]);
+
+  const startWaiting = useCallback(() => {
+    setCapture(null);
+    setLastSeen(null);
+    setWaitSince(Date.now());
+    setStage("等待");
+  }, []);
+
+  // 接了資料夾來源就自動待命 —— 操作員手上抱著箱子，走到相機前拍一張，
+  // 回頭畫面上就該是結果。要求他先回來點一個按鈕，等於在流程裡插一步
+  // 只為了讓程式知道「可以開始了」。
+  useEffect(() => {
+    if (folderSource && stage === "拍照") startWaiting();
+  }, [folderSource, stage, startWaiting]);
+
   const selected = items.find((i) => i.id === itemId);
   const fifoLot = useMemo(() => lots.find((l) => l.is_fifo_next) ?? null, [lots]);
   const chosenLot = lots.find((l) => l.id === lotId);
@@ -140,6 +188,11 @@ function IssueScreen() {
       await loadLots(result.item_id, result.locked_lot?.lot_id);
       setStage("判定");
     } catch (e) {
+      // 照片太舊不是故障，是還沒拍 —— 回去繼續等，不要把人踢進手動登錄
+      if (e instanceof StaleImage) {
+        setStage("等待");
+        return;
+      }
       setStage("手動");
       message.error(`${(e as Error).message}　已切到手動登錄`);
     } finally {
@@ -178,6 +231,8 @@ function IssueScreen() {
     setCapture(null);
     setVerdict(null);
     setQty(1);
+    setWaitSince(null);
+    setLastSeen(null);
     form.resetFields();
     setStage(to);
     if (to === "拍照") { setItemId(undefined); setLots([]); setLotId(undefined); }
@@ -187,26 +242,30 @@ function IssueScreen() {
 
   const scanButtons = (
     <>
-      <input
-        ref={fileRef}
-        type="file"
-        accept="image/*"
-        capture="environment"
-        style={{ display: "none" }}
-        onChange={(e) => e.target.files?.[0] && runScan(() => api.recognize(e.target.files![0]))}
-      />
       <Space orientation="vertical" size={12} style={{ width: "100%" }}>
         <Button
           type="primary"
           size="large"
-          icon={<CameraOutlined />}
+          icon={folderSource ? <VideoCameraOutlined /> : <CameraOutlined />}
           loading={scanning}
-          onClick={() => fileRef.current?.click()}
+          onClick={() => (folderSource ? startWaiting() : fileRef.current?.click())}
           style={{ height: 96, fontSize: 26, width: "100%" }}
         >
           拍這一箱
         </Button>
-        {cameraOn && (
+        {/* 接了固定相機時，手機拍照退成備援 —— 相機壞了還是要能領。 */}
+        {folderSource && (
+          <Button
+            size="large"
+            icon={<CameraOutlined />}
+            loading={scanning}
+            onClick={() => fileRef.current?.click()}
+            style={{ height: TOUCH, fontSize: 18, width: "100%" }}
+          >
+            改用手機拍
+          </Button>
+        )}
+        {cameraOn && !folderSource && (
           <Button
             size="large"
             icon={<VideoCameraOutlined />}
@@ -223,6 +282,17 @@ function IssueScreen() {
 
   return (
     <>
+      {/* 掛在最外層而不是拍照那一段裡：接了資料夾來源時畫面會直接進「等待」，
+          手機拍照是那裡的備援出口，input 不在 DOM 上就按不動。 */}
+      <input
+        ref={fileRef}
+        type="file"
+        accept="image/*"
+        capture="environment"
+        style={{ display: "none" }}
+        onChange={(e) => e.target.files?.[0] && runScan(() => api.recognize(e.target.files![0]))}
+      />
+
       <Title level={3} style={{ marginTop: 0 }}>領用登錄</Title>
 
       {stage === "拍照" && (
@@ -235,7 +305,7 @@ function IssueScreen() {
           ) : (
             <>
               <div style={{ fontSize: 22, fontWeight: 600, marginBottom: 8 }}>
-                把箱子放好，拍側面的標籤和紅色驗收章
+                把箱子放好，拍側面標籤 —— 要看得到型號和生產日期
               </div>
               <Text type="secondary" style={{ fontSize: 16, display: "block", marginBottom: 24 }}>
                 不用先選要領什麼 —— 拍完系統會告訴你這箱能不能拿出去。
@@ -256,6 +326,52 @@ function IssueScreen() {
         </Card>
       )}
 
+      {stage === "等待" && (
+        <Card>
+          <div style={{ textAlign: "center", padding: "32px 0" }}>
+            {/* 照片位置先留白 —— 舊照片放在這裡最危險：它看起來就像剛拍的。 */}
+            <div style={{
+              height: 260, borderRadius: 8, border: "2px dashed #d9d9d9",
+              display: "flex", flexDirection: "column", alignItems: "center",
+              justifyContent: "center", gap: 16, background: "#fafafa",
+            }}>
+              <Spin size="large" />
+              <div style={{ fontSize: 24, fontWeight: 600 }}>去拍這一箱</div>
+              <Text type="secondary" style={{ fontSize: 16 }}>
+                拍完存進資料夾就會自動開始辨識，不用回來按任何東西。
+              </Text>
+            </div>
+
+            <Text type="secondary" style={{ display: "block", marginTop: 20, fontSize: 15 }}>
+              {lastSeen
+                ? `資料夾最新的是 ${new Date(lastSeen).toLocaleTimeString("zh-TW")} 那張，在等更新的。`
+                : "正在看資料夾…"}
+            </Text>
+
+            <Space style={{ marginTop: 20 }} wrap>
+              {/* 相機拍不出來、或這箱根本沒標籤時的出口。等待畫面沒有這個，
+                  人就只能盯著轉圈圈。 */}
+              <Button
+                size="large"
+                icon={<UnorderedListOutlined />}
+                onClick={() => { setWaitSince(null); setStage("手動"); }}
+                style={{ height: TOUCH, fontSize: 18, minWidth: 180 }}
+              >
+                改手動登錄
+              </Button>
+              <Button
+                size="large"
+                icon={<CameraOutlined />}
+                onClick={() => fileRef.current?.click()}
+                style={{ height: TOUCH, fontSize: 18, minWidth: 150 }}
+              >
+                改用手機拍
+              </Button>
+            </Space>
+          </div>
+        </Card>
+      )}
+
       {stage === "判定" && capture && (
         <ScanVerdict
           capture={capture}
@@ -273,24 +389,49 @@ function IssueScreen() {
           }
         >
           {capture && !capture.item_id && (
-            <Alert
-              style={{ marginBottom: 16 }}
-              type="warning"
-              title="這張照片認不出是哪個品項，請自己選"
-              description={
-                <Space orientation="vertical" size={2}>
-                  <span>
-                    標籤讀到：{capture.recognition.model_code ?? capture.recognition.item_code ?? "讀不出型號"}
-                    ｜章：{capture.recognition.receipt_date ?? "讀不出"}
-                  </span>
-                  {capture.recognition.notes && (
-                    <Text type="secondary">{capture.recognition.notes}</Text>
-                  )}
-                  <Text type="secondary">照片已留存，會跟著這筆紀錄一起存檔。</Text>
-                </Space>
-              }
-              action={<Button size="small" icon={<ReloadOutlined />} onClick={() => reset("拍照")}>重拍</Button>}
-            />
+            <>
+              <Alert
+                style={{ marginBottom: 16 }}
+                type="warning"
+                title="這張照片認不出是哪個品項，請自己選"
+                description={
+                  <Space orientation="vertical" size={2}>
+                    <span>
+                      型號：{capture.recognition.model_code ?? capture.recognition.item_code ?? "讀不出來"}
+                      ｜生產日期：{capture.recognition.manufacture_date ?? "讀不出來"}
+                    </span>
+                    {capture.recognition.notes && (
+                      <Text type="secondary">{capture.recognition.notes}</Text>
+                    )}
+                    <Text type="secondary">照片已留存，會跟著這筆紀錄一起存檔。</Text>
+                  </Space>
+                }
+                action={<Button size="small" icon={<ReloadOutlined />} onClick={() => reset("拍照")}>重拍</Button>}
+              />
+              {/* 認不出來的時候更需要看到圖：要判斷是「拍糊了」還是「主檔沒這支型號」，
+                  只給一行文字沒辦法決定下一步該重拍還是去建品項。 */}
+              {capture.image_path && (
+                <Card style={{ marginBottom: 16 }} styles={{ body: { padding: 12 } }}>
+                  <Space size={10} style={{ marginBottom: 8 }} wrap>
+                    <Text style={{ fontWeight: 600 }}>剛拍的這張</Text>
+                    {capture.source_time && (
+                      <Tag color="blue">
+                        {new Date(capture.source_time).toLocaleString("zh-TW", { hour12: false })}
+                      </Tag>
+                    )}
+                  </Space>
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={capture.image_path}
+                    alt="剛拍的箱子"
+                    style={{
+                      width: "100%", maxHeight: 360, objectFit: "contain",
+                      borderRadius: 6, background: "#000",
+                    }}
+                  />
+                </Card>
+              )}
+            </>
           )}
           <Select
             size="large"
@@ -463,17 +604,33 @@ function IssueScreen() {
                   ),
                 }]}
               />
-              <Button
-                type="primary"
-                size="large"
-                loading={busy}
-                disabled={!lotId}
-                danger={takingWrongLot}
-                onClick={submit}
-                style={{ height: TOUCH, fontSize: 20, width: "100%", marginTop: 8 }}
-              >
-                {takingWrongLot ? `還是要領這箱（會記錄、不扣帳）` : `確認領用 ${qty} 箱`}
-              </Button>
+              <Row gutter={12} style={{ marginTop: 8 }}>
+                <Col span={16}>
+                  <Button
+                    type="primary"
+                    size="large"
+                    loading={busy}
+                    disabled={!lotId}
+                    danger={takingWrongLot}
+                    onClick={submit}
+                    style={{ height: TOUCH, fontSize: 20, width: "100%" }}
+                  >
+                    {takingWrongLot ? `還是要領這箱（會記錄、不扣帳）` : `確認領用 ${qty} 箱`}
+                  </Button>
+                </Col>
+                <Col span={8}>
+                  {/* 取消只是丟掉這次的辨識回到拍照 —— 沒有東西被扣，也沒有紀錄被刪，
+                      因為在按下確認之前本來就還沒有紀錄。 */}
+                  <Button
+                    size="large"
+                    disabled={busy}
+                    onClick={() => reset("拍照")}
+                    style={{ height: TOUCH, fontSize: 20, width: "100%" }}
+                  >
+                    取消
+                  </Button>
+                </Col>
+              </Row>
               <Text type="secondary" style={{ display: "block", marginTop: 12, textAlign: "center" }}>
                 {selected && chosenLot
                   ? `${selected.label}｜${qty} 箱｜製造 ${chosenLot.manufacture_date ?? "未填"}｜進貨 ${chosenLot.receipt_date}`
@@ -546,11 +703,89 @@ function ScanVerdict({ capture, lots, onRetake, onManual }: {
 
         {state === "unknown" && (
           <div style={{ fontSize: 19, marginTop: 20, lineHeight: 1.7 }}>
-            章讀到「{capture.recognition.receipt_date ?? "讀不出"}」，跟在庫的批次都對不起來。
+            生產日期讀到「{capture.recognition.manufacture_date ?? "讀不出"}」，跟在庫的批次都對不起來。
             <div style={{ opacity: 0.9, fontSize: 17 }}>照片已留存。請在下面挑正確的批次。</div>
           </div>
         )}
       </div>
+
+      {/* 照片放在判定下面，而不是只給一條「看照片」連結：要確認「這是我這箱」，
+          得看得到那張圖，還得知道它是什麼時候拍的。 */}
+      {capture.image_path && (
+        <Card style={{ marginTop: 16 }} styles={{ body: { padding: 16 } }}>
+          <Space align="center" size={12} style={{ marginBottom: 12 }} wrap>
+            <Text style={{ fontSize: 18, fontWeight: 600 }}>這張照片</Text>
+            {capture.source_time && (
+              <Tag color="blue" style={{ fontSize: 15, padding: "2px 10px" }}>
+                拍攝時間 {new Date(capture.source_time).toLocaleString("zh-TW", { hour12: false })}
+              </Tag>
+            )}
+            {capture.source_name && <Text type="secondary">{capture.source_name}</Text>}
+          </Space>
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src={capture.image_path}
+            alt="剛拍的箱子"
+            style={{
+              width: "100%", maxHeight: 420, objectFit: "contain",
+              borderRadius: 6, background: "#000",
+            }}
+          />
+
+          <div style={{ marginTop: 16 }}>
+            <Text style={{ fontSize: 18, fontWeight: 600 }}>辨識內容</Text>
+            <Row gutter={16} style={{ marginTop: 8, fontSize: 17 }}>
+              <Col xs={24} md={12}>
+                品項：
+                <strong>
+                  {capture.item_label ?? capture.recognition.model_code ?? "讀不出來"}
+                </strong>
+                {capture.item_name && <Text type="secondary">　{capture.item_name}</Text>}
+              </Col>
+              <Col xs={24} md={12}>
+                製造日期：
+                <strong>{capture.recognition.manufacture_date ?? "讀不出來"}</strong>
+              </Col>
+            </Row>
+          </div>
+        </Card>
+      )}
+
+      {/* 這個品項在庫的每一批製造日，攤開來讓人自己對 —— 系統說「該領哪批」是一回事，
+          看得到全部才知道手上這箱排在哪裡。 */}
+      {lots.length > 0 && (
+        <Card
+          title={`${capture.item_label ?? "這個品項"} 在庫批次的製造日期`}
+          style={{ marginTop: 16 }}
+          styles={{ body: { padding: 16 } }}
+        >
+          <Space orientation="vertical" size={8} style={{ width: "100%" }}>
+            {lots.map((lot) => {
+              const isThis = locked?.lot_id === lot.id;
+              return (
+                <div
+                  key={lot.id}
+                  style={{
+                    display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap",
+                    padding: "10px 14px", borderRadius: 6, fontSize: 17,
+                    border: `1px solid ${isThis ? "#1677ff" : "#f0f0f0"}`,
+                    background: isThis ? "#e6f4ff" : "#fff",
+                  }}
+                >
+                  <span style={{ fontWeight: 600, minWidth: 150 }}>
+                    製造 {lot.manufacture_date ?? "未填"}
+                  </span>
+                  {isThis && <Tag color="blue">你手上這箱</Tag>}
+                  {lot.is_fifo_next && <Tag color="green">FIFO 應領</Tag>}
+                  {lot.fifo_also_ok && <Tag>同製造日．可領</Tag>}
+                  <Text type="secondary">進貨 {lot.receipt_date}</Text>
+                  <Text type="secondary">在庫 {lot.qty_on_hand} 箱</Text>
+                </div>
+              );
+            })}
+          </Space>
+        </Card>
+      )}
 
       <Space style={{ marginTop: 16 }} wrap>
         <Button icon={<ReloadOutlined />} onClick={onRetake} style={{ height: 48, fontSize: 16 }}>
@@ -558,7 +793,7 @@ function ScanVerdict({ capture, lots, onRetake, onManual }: {
         </Button>
         <Button type="link" onClick={onManual} style={{ fontSize: 16 }}>辨識錯了？改手動選</Button>
         {capture.image_path && (
-          <a href={capture.image_path} target="_blank" rel="noreferrer" style={{ fontSize: 16 }}>看照片</a>
+          <a href={capture.image_path} target="_blank" rel="noreferrer" style={{ fontSize: 16 }}>原圖</a>
         )}
       </Space>
 
