@@ -14,9 +14,14 @@
  */
 
 import { ArrowRightOutlined, InboxOutlined } from "@ant-design/icons";
-import { Button, Card, Col, Empty, Row, Space, Statistic, Table, Tag, Tooltip, Typography, message } from "antd";
+import {
+  Alert, Button, Card, Col, DatePicker, Empty, Form, InputNumber, Modal, Popconfirm,
+  Input, Radio, Row, Space, Statistic, Table, Tag, Tooltip, Typography, message,
+} from "antd";
+import dayjs from "dayjs";
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
+import CreatableSelect from "@/components/CreatableSelect";
 import { useAuth } from "@/components/AuthGate";
 import ExpiryCell from "@/components/ExpiryCell";
 import { useColumnWidths } from "@/components/resizable";
@@ -30,6 +35,10 @@ export default function StockPage() {
   const [alerts, setAlerts] = useState<Alerts | null>(null);
   const { can } = useAuth();
   const cols = useColumnWidths("stock");
+  const [editing, setEditing] = useState<Lot | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [suppliers, setSuppliers] = useState<string[]>([]);
+  const [editForm] = Form.useForm();
 
   const load = useCallback(async () => {
     const [i, l, a] = await Promise.allSettled([api.items(), api.lots(), api.alerts()]);
@@ -38,7 +47,48 @@ export default function StockPage() {
     if (l.status === "fulfilled") setLots(l.value);
     else message.error(`批次載入失敗：${l.reason?.message}`);
     if (a.status === "fulfilled") setAlerts(a.value);
+    api.itemOptions().then((o) => setSuppliers(o.supplier)).catch(() => undefined);
   }, []);
+
+  // Lot corrections live here because this is where lots are looked at. Keeping
+  // a second copy of the table on the receiving screen meant two places showing
+  // the same rows, one of which was always slightly out of date.
+  async function saveEdit() {
+    const values = await editForm.validateFields().catch(() => null);
+    if (!values || !editing) return;
+    setBusy(true);
+    try {
+      const res = await api.patchLot(editing.id, {
+        receipt_date: values.receipt_date ? dayjs(values.receipt_date).format("YYYY-MM-DD") : undefined,
+        manufacture_date: values.manufacture_date ? dayjs(values.manufacture_date).format("YYYY-MM-DD") : undefined,
+        expiry_date: values.expiry_date ? dayjs(values.expiry_date).format("YYYY-MM-DD") : undefined,
+        supplier: values.supplier || undefined,
+        qty_on_hand: values.qty_on_hand,
+        verdict: values.verdict || undefined,
+        remark: values.remark || undefined,
+      });
+      message.success("已更新，變更前後值已寫入系統日誌");
+      if (res.posted_draws > 0) {
+        message.warning(`這批已有 ${res.posted_draws} 筆領用紀錄，改動會影響既有帳。`, 8);
+      }
+      setEditing(null);
+      load();
+    } catch (e) {
+      message.error((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function removeLot(lot: Lot) {
+    try {
+      await api.deleteLot(lot.id);
+      message.success("已刪除");
+      load();
+    } catch (e) {
+      message.error((e as Error).message, 10);
+    }
+  }
 
   useEffect(() => { load(); }, [load]);
 
@@ -123,10 +173,13 @@ export default function StockPage() {
                     {
                       title: "進貨日", dataIndex: "receipt_date",
                       render: (v: string, row: Lot) => (
-                        <Space>
+                        <Space size={4} wrap>
                           {v}
-                          {row.is_fifo_next && row.qty_on_hand > 0 && row.verdict !== "不合格" && (
-                            <Tag color="green">FIFO 應領</Tag>
+                          {row.is_fifo_next && <Tag color="green">FIFO 應領</Tag>}
+                          {row.fifo_also_ok && (
+                            <Tooltip title="跟應領那批同一個進貨日，領這批也合法">
+                              <Tag>同進貨日．可領</Tag>
+                            </Tooltip>
                           )}
                         </Space>
                       ),
@@ -164,6 +217,36 @@ export default function StockPage() {
                             <Text type="secondary">（單上 {row.entered_meters.toLocaleString()}）</Text>
                           ) : null}
                         </span>
+                      ),
+                    },
+                    {
+                      title: "", width: 120, hidden: !can("lot.edit") && !can("lot.delete"),
+                      render: (_, row: Lot) => (
+                        <Space size={4}>
+                          <Button size="small" type="link" onClick={() => {
+                            setEditing(row);
+                            editForm.setFieldsValue({
+                              receipt_date: dayjs(row.receipt_date),
+                              manufacture_date: row.manufacture_date ? dayjs(row.manufacture_date) : null,
+                              expiry_date: row.expiry_date ? dayjs(row.expiry_date) : null,
+                              supplier: row.supplier, qty_on_hand: row.qty_on_hand,
+                              verdict: row.verdict, remark: row.remark,
+                            });
+                          }}>編輯</Button>
+                          {row.draw_count > 0 ? (
+                            <Tooltip title={`已有 ${row.draw_count} 筆領用紀錄，刪掉追溯會斷。要退出流通請把數量改成 0。`}>
+                              <Button size="small" type="link" disabled>刪除</Button>
+                            </Tooltip>
+                          ) : (
+                            <Popconfirm
+                              title="刪除這批？" description="沒有任何領用紀錄，可以安全刪除。"
+                              okText="刪除" cancelText="取消" okButtonProps={{ danger: true }}
+                              onConfirm={() => removeLot(row)}
+                            >
+                              <Button size="small" type="link" danger>刪除</Button>
+                            </Popconfirm>
+                          )}
+                        </Space>
                       ),
                     },
                   ]}
@@ -246,6 +329,66 @@ export default function StockPage() {
           ])}
         />
       </Card>
+
+      <Modal
+        open={Boolean(editing)}
+        title={`編輯批次 #${editing?.id}　${editing?.item_label ?? ""}`}
+        onCancel={() => setEditing(null)}
+        onOk={saveEdit}
+        confirmLoading={busy}
+        okText="儲存" cancelText="取消" width={800} destroyOnHidden
+      >
+        <Alert
+          type="info"
+          title="變更會寫入系統日誌"
+          description={editing?.draw_count
+            ? `這批已有 ${editing.draw_count} 筆領用紀錄。改進貨日會改變 FIFO 順序，改數量會影響既有帳 —— 變更前後值都會留紀錄。`
+            : "改動前後的值都會留下紀錄，不會靜默變更。"}
+          style={{ marginBottom: 16 }}
+        />
+        <Form form={editForm} layout="vertical">
+          <Row gutter={16}>
+            <Col span={8}>
+              <Form.Item name="receipt_date" label="進貨日期" extra="FIFO 排序鍵">
+                <DatePicker style={{ width: "100%" }} disabledDate={(d) => d.isAfter(dayjs(), "day")} />
+              </Form.Item>
+            </Col>
+            <Col span={8}>
+              <Form.Item name="manufacture_date" label="製造日期" extra="同進貨日時用來決定誰先領">
+                <DatePicker style={{ width: "100%" }} />
+              </Form.Item>
+            </Col>
+            <Col span={8}>
+              <Form.Item name="expiry_date" label="有效期限">
+                <DatePicker style={{ width: "100%" }} />
+              </Form.Item>
+            </Col>
+          </Row>
+          <Row gutter={16}>
+            <Col span={8}>
+              <Form.Item name="supplier" label="進貨廠商">
+                <CreatableSelect options={suppliers} placeholder="選廠商" />
+              </Form.Item>
+            </Col>
+            <Col span={8}>
+              <Form.Item name="qty_on_hand" label="在庫數量（箱）">
+                <InputNumber min={0} style={{ width: "100%" }} />
+              </Form.Item>
+            </Col>
+            <Col span={8}>
+              <Form.Item name="verdict" label="判定">
+                <Radio.Group buttonStyle="solid">
+                  <Radio.Button value="合格">合格</Radio.Button>
+                  <Radio.Button value="不合格">不合格</Radio.Button>
+                </Radio.Group>
+              </Form.Item>
+            </Col>
+          </Row>
+          <Form.Item name="remark" label="備註">
+            <Input />
+          </Form.Item>
+        </Form>
+      </Modal>
     </>
   );
 }

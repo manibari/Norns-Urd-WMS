@@ -10,7 +10,7 @@
  */
 
 import { PlusOutlined } from "@ant-design/icons";
-import { Button, Empty, Input, Space, Switch, Table, Tag, Typography, message } from "antd";
+import { Button, Empty, Input, Popconfirm, Space, Switch, Table, Tag, Tooltip, Typography, message } from "antd";
 import { useState } from "react";
 import { api, type DictEntry } from "@/lib/api";
 
@@ -47,6 +47,19 @@ export default function DictionaryTable({
     setBusy(true);
     try {
       await api.patchDictEntry(entry.id, { active });
+      onChanged();
+    } catch (e) {
+      message.error((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function remove(entry: DictEntry) {
+    setBusy(true);
+    try {
+      await api.deleteDictEntry(entry.id);
+      message.success(`已刪除「${entry.value}」`);
       onChanged();
     } catch (e) {
       message.error((e as Error).message);
@@ -108,7 +121,7 @@ export default function DictionaryTable({
           {
             title: "狀態",
             dataIndex: "active",
-            width: 200,
+            width: 190,
             align: "center" as const,
             render: (active: number, row: DictEntry) => (
               <Space>
@@ -122,11 +135,28 @@ export default function DictionaryTable({
               </Space>
             ),
           },
+          {
+            title: "",
+            width: 80,
+            align: "center" as const,
+            render: (_, row: DictEntry) => (
+              <Popconfirm
+                title={`刪除「${row.value}」？`}
+                description="既有紀錄不受影響（存的是文字，不是參照）。只是不再出現在選單。"
+                okText="刪除" cancelText="取消" okButtonProps={{ danger: true }}
+                onConfirm={() => remove(row)}
+              >
+                <Button size="small" type="text" danger disabled={busy}>刪除</Button>
+              </Popconfirm>
+            ),
+          },
         ]}
       />
       <Text type="secondary" style={{ display: "block", marginTop: 12 }}>
-        停用只是不再出現在下拉選單，既有紀錄仍然看得到 —— 舊紀錄指向這些值，
-        把它刪掉會讓追溯報表出現空白，比顯示一個已淘汰的名字更糟。
+        <strong>停用</strong>：不再出現在下拉選單，但保留在清單裡，隨時可以再啟用 —— 用在「這個先不用了」。
+        <br />
+        <strong>刪除</strong>：整個移除。既有紀錄不受影響（存的是當時選的文字，不是參照），
+        所以刪掉「弘東京」不會讓去年的收貨單變空白 —— 用在「這一筆本來就是打錯的」。
       </Text>
     </>
   );

@@ -22,7 +22,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "core"))
 
 from urdwms_core.matching import (  # noqa: E402
-    Candidate, fifo_expected, match_candidates, match_item_code,
+    Candidate, fifo_expected, fifo_target, match_candidates, match_item_code,
 )
 from urdwms_core.normalize import normalize_item_code, to_date_key  # noqa: E402
 from urdwms_core.recognition import GeminiProvider, Recognition  # noqa: E402
@@ -58,12 +58,12 @@ def _candidates(conn, item_id: int) -> list[Candidate]:
     # A rejected lot is not a candidate. It stays on the books (the record is the
     # deliverable) but FIFO must never point anyone at it, and nobody may draw it.
     rows = conn.execute(
-        "SELECT id, receipt_date FROM inventory_lot"
+        "SELECT id, receipt_date, manufacture_date FROM inventory_lot"
         " WHERE item_id = ? AND qty_on_hand > 0 AND COALESCE(verdict, '合格') <> '不合格'"
         " ORDER BY receipt_date",
         (item_id,),
     ).fetchall()
-    return [Candidate(str(r["id"]), r["receipt_date"]) for r in rows]
+    return [Candidate(str(r["id"]), r["receipt_date"], r["manufacture_date"]) for r in rows]
 
 
 def _fifo_verdict(candidates: list[Candidate], lot_id: str) -> tuple[bool, str | None]:
@@ -323,6 +323,26 @@ def update_role(code: str, payload: RolePatch,
     return {"code": code, "label": label}
 
 
+@app.delete("/api/dictionary/{entry_id}")
+def delete_dictionary_entry(entry_id: int,
+                            user: dict = Depends(requires("dictionary.manage"))) -> dict:
+    """Remove an option outright.
+
+    Safe because records store the chosen value as text, not a reference —
+    deleting 「弘東京」 from the list does not blank it out of last year's
+    receiving lines. Deactivating is still the gentler option when the value is
+    merely retired; deletion is for entries that were mistakes.
+    """
+    with transaction() as conn:
+        row = conn.execute("SELECT * FROM dictionary WHERE id = ?", (entry_id,)).fetchone()
+        if row is None:
+            raise HTTPException(404, "字典項目不存在")
+        conn.execute("DELETE FROM dictionary WHERE id = ?", (entry_id,))
+        log(conn, user["name"], "dictionary.delete",
+            {"category": row["category"], "value": row["value"]})
+    return {"id": entry_id, "deleted": True, "value": row["value"]}
+
+
 @app.get("/api/users")
 def users(user: dict = Depends(requires("user.manage"))) -> list[dict]:
     with transaction() as conn:
@@ -410,6 +430,10 @@ def update_user(user_id: int, payload: UserPatch,
 # records reference it, and a traceability report rendering a blank where a
 # machine used to be is worse than one naming a machine that no longer exists.
 DICTIONARY_CATEGORIES: dict[str, str] = {
+    # 廠商 IS a free-standing thing (one supplier serves many items), unlike
+    # 原物料名稱/規格 which only ever describe one item — hence a list of its
+    # own that can be curated.
+    "supplier": "廠商",
     "job_title": "職位名稱",
     "pack_unit": "計量單位",
     "machine": "包裝機台",
@@ -551,10 +575,16 @@ def item_options(user: dict = Depends(current_user)) -> dict:
     with transaction() as conn:
         rows = conn.execute(
             "SELECT DISTINCT supplier, name, spec FROM inventory_item").fetchall()
+        dict_suppliers = [r["value"] for r in conn.execute(
+            "SELECT value FROM dictionary WHERE category = 'supplier' AND active = 1"
+            " ORDER BY sort_order, value").fetchall()]
     def distinct(key: str) -> list[str]:
         return sorted({r[key] for r in rows if r[key]})
     return {
-        "supplier": distinct("supplier"),
+        # Curated list first, then any supplier already on an item that has not
+        # been added to it — so an existing value never becomes unselectable
+        # just because someone tidied the list.
+        "supplier": dict_suppliers + [v for v in distinct("supplier") if v not in dict_suppliers],
         "material_name": distinct("name"),
         "spec": distinct("spec"),
     }
@@ -664,8 +694,14 @@ def lots(item_id: int | None = None, user: dict = Depends(current_user)) -> list
             by_item[key] = _candidates(conn, key)
 
     for row in rows:
-        expected = fifo_expected(by_item.get(row["item_id"], []))
-        row["is_fifo_next"] = str(row["id"]) in expected
+        pool = by_item.get(row["item_id"], [])
+        # One lot gets the badge. Judgement still accepts every same-day lot
+        # (see fifo_ok on the issuing side) — but a screen marking two lots
+        # "應領" has told nobody which box to pick up.
+        row["is_fifo_next"] = str(row["id"]) == fifo_target(pool)
+        row["fifo_also_ok"] = (
+            str(row["id"]) in fifo_expected(pool) and str(row["id"]) != fifo_target(pool)
+        )
         row["inspection"] = json.loads(row.get("inspection") or "{}")
         row["draw_count"] = drawn.get(row["id"], 0)
         row["item_label"] = row["item_model"] or row["item_name"]
@@ -1033,6 +1069,7 @@ def _lot_lookup(item_id: int, read_receipt_date: str | None) -> dict:
         "decision": result.decision.value,
         "defer_reason": result.reason.value if result.reason else None,
         "match_distance": result.best_distance,
+        "fifo_target_lot_id": int(fifo_target(candidates)) if fifo_target(candidates) else None,
     }
     if not result.locked:
         return {**out, "locked_lot": None, "fifo_ok": None, "fifo_expected_date": None}

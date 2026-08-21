@@ -36,7 +36,10 @@ export type Lot = {
   /** 未動用 | 領貨中 | 已領完 */
   lot_state: "未動用" | "領貨中" | "已領完";
   qty_on_hand: number;
+  /** FIFO 指引：唯一該領的那一批 */
   is_fifo_next: boolean;
+  /** 同進貨日的其他批：領了也合法，只是指引沒指它 */
+  fifo_also_ok: boolean;
 };
 
 export type Item = {
@@ -311,6 +314,8 @@ export const api = {
     req<Dictionary>(`/api/dictionary${includeInactive ? "?include_inactive=true" : ""}`),
   addDictEntry: (category: string, value: string) =>
     req<{ id: number; value: string; revived: boolean }>("/api/dictionary", json({ category, value })),
+  deleteDictEntry: (id: number) =>
+    req<{ id: number; deleted: boolean; value: string }>(`/api/dictionary/${id}`, { method: "DELETE" }),
   patchDictEntry: (id: number, body: Record<string, unknown>) =>
     req<Record<string, unknown>>(`/api/dictionary/${id}`, {
       method: "PATCH",

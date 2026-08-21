@@ -28,7 +28,7 @@
 import { CameraOutlined, InboxOutlined, ReloadOutlined } from "@ant-design/icons";
 import {
   Alert, Button, Card, Col, Collapse, Empty, Form, Input, InputNumber, Radio,
-  Row, Select, Space, Spin, Tag, Typography, message,
+  Row, Select, Space, Spin, Tag, Tooltip, Typography, message,
 } from "antd";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
@@ -106,11 +106,11 @@ function IssueScreen() {
   }, [itemId, loadLots]);
 
   const selected = items.find((i) => i.id === itemId);
-  const fifoLot = useMemo(
-    () => (lots.length ? lots.reduce((a, b) => (a.receipt_date <= b.receipt_date ? a : b)) : null),
-    [lots],
-  );
-  const takingWrongLot = Boolean(lotId && fifoLot && lotId !== fifoLot.id);
+  const fifoLot = useMemo(() => lots.find((l) => l.is_fifo_next) ?? null, [lots]);
+  const chosen = lots.find((l) => l.id === lotId);
+  // Only warn about a genuinely later lot. A same-day lot is accepted by the
+  // judgement, so warning about it would be crying wolf.
+  const takingWrongLot = Boolean(chosen && !chosen.is_fifo_next && !chosen.fifo_also_ok);
   const chosenLot = lots.find((l) => l.id === lotId);
   useEffect(() => { setQty(1); }, [lotId]);
 
@@ -286,6 +286,11 @@ function IssueScreen() {
                       )}
                       <Text type="secondary">在庫 {lot.qty_on_hand} 箱</Text>
                       {lot.is_fifo_next && <Tag color="green">FIFO 應領</Tag>}
+                      {lot.fifo_also_ok && (
+                        <Tooltip title="跟應領那批同一個進貨日，領這批也合法，不會被擋">
+                          <Tag>同進貨日．可領</Tag>
+                        </Tooltip>
+                      )}
                     </Space>
                   </Radio>
                 ))}

@@ -199,6 +199,8 @@ export default function BasicsPage() {
                   options={options.supplier}
                   placeholder="—"
                   addLabel="新增廠商"
+                  category="supplier"
+                  onAdded={load}
                   style={{ width: "100%" }}
                   onChange={(next) => patchField(row, "supplier", next)}
                 />
@@ -300,7 +302,8 @@ export default function BasicsPage() {
               </Form.Item>
               <Form.Item name="supplier" style={{ marginInlineEnd: 8 }}>
                 <CreatableSelect options={options.supplier} placeholder="廠商"
-                                 addLabel="新增廠商" style={{ width: 130 }} />
+                                 addLabel="新增廠商" category="supplier" onAdded={load}
+                                 style={{ width: 130 }} />
               </Form.Item>
               <Form.Item name="meters_per_box" style={{ marginInlineEnd: 8 }}>
                 <InputNumber placeholder="每箱數量" min={1} step={100} style={{ width: 110 }} />

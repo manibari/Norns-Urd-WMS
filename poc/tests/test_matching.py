@@ -6,7 +6,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "core"))
 
-from urdwms_core.matching import Candidate, DeferReason, fifo_expected, match_candidates
+from urdwms_core.matching import (
+    Candidate, DeferReason, fifo_expected, fifo_target, match_candidates,
+)
 from urdwms_core.normalize import to_date_key
 
 STOCK = [
@@ -68,6 +70,39 @@ class Fifo(unittest.TestCase):
 
     def test_no_stock(self):
         self.assertEqual(fifo_expected([]), [])
+
+
+class FifoTarget(unittest.TestCase):
+    """Guidance names exactly one lot, even where judgement accepts several."""
+
+    def test_points_at_the_single_earliest(self):
+        self.assertEqual(fifo_target(STOCK), "L3")
+
+    def test_same_day_breaks_on_manufacture_date(self):
+        # Both are legal to draw, but the screen must name one — the older stock.
+        same_day = [
+            Candidate("A", "2026-04-10", "2025-09-26"),
+            Candidate("B", "2026-04-10", "2025-08-19"),
+        ]
+        self.assertEqual(sorted(fifo_expected(same_day)), ["A", "B"])
+        self.assertEqual(fifo_target(same_day), "B")
+
+    def test_unknown_manufacture_date_does_not_jump_the_queue(self):
+        same_day = [
+            Candidate("A", "2026-04-10", None),
+            Candidate("B", "2026-04-10", "2025-09-26"),
+        ]
+        self.assertEqual(fifo_target(same_day), "B")
+
+    def test_fully_tied_falls_back_to_lot_id_for_stability(self):
+        same_day = [
+            Candidate("B", "2026-04-10", "2025-09-26"),
+            Candidate("A", "2026-04-10", "2025-09-26"),
+        ]
+        self.assertEqual(fifo_target(same_day), "A")
+
+    def test_no_stock(self):
+        self.assertIsNone(fifo_target([]))
 
 
 if __name__ == "__main__":

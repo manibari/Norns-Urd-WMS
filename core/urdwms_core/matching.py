@@ -122,6 +122,7 @@ class Candidate:
 
     lot_id: str
     receipt_date: str          # ISO, authoritative — it came from receiving, not from a photo
+    manufacture_date: str | None = None   # tie-breaker when two lots arrived the same day
 
     @property
     def key(self) -> str:
@@ -178,12 +179,36 @@ def match_candidates(
 
 
 def fifo_expected(candidates: list[Candidate]) -> list[str]:
-    """Lot ids that FIFO would have the operator take: all lots sharing the earliest receipt date.
+    """Lot ids FIFO accepts: every lot sharing the earliest receipt date.
 
-    Same-day lots are equally legal (requirement US-3), so this returns a list,
-    not a single lot.
+    This is the JUDGEMENT: same-day lots are equally legal (requirement US-3),
+    so drawing any of them passes. Use `fifo_target` for what to TELL someone to
+    take — a screen that marks two lots "應領" has said nothing.
     """
     if not candidates:
         return []
     earliest = min(c.receipt_date for c in candidates)
     return [c.lot_id for c in candidates if c.receipt_date == earliest]
+
+
+def fifo_target(candidates: list[Candidate]) -> str | None:
+    """The single lot to point at: earliest receipt date, then earliest manufacture date.
+
+    Guidance and judgement are deliberately different here. Judgement stays
+    permissive because refusing a same-day lot would block a draw that is
+    genuinely fine; guidance has to name one box, because "take either of these
+    two" is not an instruction anyone can act on while holding a roll of film.
+
+    Ties break on manufacture date because between two lots received together,
+    the older stock is the one that should move first. A missing manufacture
+    date sorts last: unknown age should not jump the queue ahead of a lot whose
+    age is known.
+    """
+    accepted = set(fifo_expected(candidates))
+    if not accepted:
+        return None
+    pool = [c for c in candidates if c.lot_id in accepted]
+    return min(
+        pool,
+        key=lambda c: (c.manufacture_date is None, c.manufacture_date or "", c.lot_id),
+    ).lot_id
