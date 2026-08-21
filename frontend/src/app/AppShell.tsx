@@ -48,10 +48,19 @@ const NAV = [
 ];
 
 export default function AppShell({ children }: { children: React.ReactNode }) {
-  // Locale only. The SoT specifies antd v6 defaults with no theme override,
-  // so no `theme={}` here — the palette stays ChimesFlow-standard.
+  // ChimesFlow SoT override (mode b), declared explicitly rather than drifted into:
+  //   KEPT     — the entire palette, component conventions, layout. No colour changes.
+  //   REPLACED — type scale only. antd's 14px base is sized for a desk monitor;
+  //              this runs on a tablet held at arm's length next to a packing line,
+  //              where 14px is unreadable without leaning in — and leaning in with
+  //              gloved hands and a box in the other arm is the thing this system
+  //              is supposed to remove.
+  // Reason: legibility at working distance, not aesthetics.
   return (
-    <ConfigProvider locale={zhTW}>
+    <ConfigProvider
+      locale={zhTW}
+      theme={{ token: { fontSize: 16, fontSizeHeading2: 30, fontSizeHeading3: 24, fontSizeHeading4: 20 } }}
+    >
       <AuthGate>
         <Shell>{children}</Shell>
       </AuthGate>

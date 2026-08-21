@@ -22,6 +22,7 @@ import dayjs from "dayjs";
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import CreatableSelect from "@/components/CreatableSelect";
+import StockCharts from "@/components/StockCharts";
 import { useAuth } from "@/components/AuthGate";
 import ExpiryCell from "@/components/ExpiryCell";
 import { useColumnWidths } from "@/components/resizable";
@@ -98,6 +99,14 @@ export default function StockPage() {
     lotsByItem.get(lot.item_id)!.push(lot);
   }
 
+  // Read from a tablet at arm's length on the shop floor, not from a desk.
+  const bigStat = {
+    styles: { content: { fontSize: 40, fontWeight: 700, lineHeight: 1.2 }, title: { fontSize: 16 } },
+  };
+  const warn = (on: boolean) => ({
+    styles: { ...bigStat.styles, content: { ...bigStat.styles.content, ...(on ? { color: "#faad14" } : {}) } },
+  });
+
   const totalBoxes = items.reduce((sum, i) => sum + i.on_hand, 0);
   const totalRejected = items.reduce((sum, i) => sum + i.rejected_qty, 0);
   const lowStock = alerts?.low_stock.length ?? 0;
@@ -105,18 +114,22 @@ export default function StockPage() {
 
   return (
     <>
-      <Title level={3} style={{ marginTop: 0 }}>庫存總覽</Title>
+      <Title level={2} style={{ marginTop: 0 }}>庫存總覽</Title>
 
       <Card>
         <Row gutter={24}>
-          <Col xs={12} md={6}><Statistic title="品項" value={items.length} suffix="項" /></Col>
-          <Col xs={12} md={6}><Statistic title="可領用" value={totalBoxes} suffix="箱" /></Col>
+          <Col xs={12} md={6}>
+            <Statistic title="品項" value={items.length} suffix="項" {...bigStat} />
+          </Col>
+          <Col xs={12} md={6}>
+            <Statistic title="可領用" value={totalBoxes} suffix="箱" {...bigStat} />
+          </Col>
           <Col xs={12} md={6}>
             <Statistic
               title="低於安全水位"
               value={lowStock}
               suffix="項"
-              valueStyle={lowStock ? { color: "#faad14" } : undefined}
+              {...warn(lowStock > 0)}
             />
           </Col>
           <Col xs={12} md={6}>
@@ -124,19 +137,21 @@ export default function StockPage() {
               title="效期將屆"
               value={expiring}
               suffix="批"
-              valueStyle={expiring ? { color: "#faad14" } : undefined}
+              {...warn(expiring > 0)}
             />
           </Col>
         </Row>
         {totalRejected > 0 && (
-          <Text type="danger" style={{ display: "block", marginTop: 16 }}>
+          <Text type="danger" style={{ display: "block", marginTop: 16, fontSize: 15 }}>
             另有 {totalRejected} 箱驗收不合格的庫存，不計入可領用，也不會被 FIFO 指到。
           </Text>
         )}
       </Card>
 
+      <StockCharts items={items} lots={lots} />
+
       <Card
-        title="各品項庫存（最近進貨的在最上面）"
+        title={<span style={{ fontSize: 18 }}>各品項庫存（最近進貨的在最上面）</span>}
         style={{ marginTop: 24 }}
         extra={
           <Space>
@@ -154,7 +169,7 @@ export default function StockPage() {
           dataSource={items}
           pagination={false}
           size="middle"
-          scroll={{ x: 1120 }}
+          scroll={{ x: 1420 }}
           locale={{ emptyText: <Empty description="尚無品項" image={Empty.PRESENTED_IMAGE_SIMPLE} /> }}
           expandable={{
             expandedRowRender: (item) => {
@@ -257,13 +272,13 @@ export default function StockPage() {
             },
           }}
           columns={cols.resizable([
-            { title: "原物料名稱", dataIndex: "name", width: 190,
+            { title: "原物料名稱", dataIndex: "name", width: 210,
               render: (v: string) => <Text strong>{v}</Text> },
-            { title: "型號", dataIndex: "model", width: 130,
+            { title: "型號", dataIndex: "model", width: 145,
               render: (v: string | null) => v ?? <Text type="secondary">（無）</Text> },
-            { title: "規格", dataIndex: "spec", width: 140, render: (v) => v ?? "—" },
+            { title: "規格", dataIndex: "spec", width: 155, render: (v) => v ?? "—" },
             {
-              title: "可領用", dataIndex: "on_hand", width: 150, align: "right" as const,
+              title: "可領用", dataIndex: "on_hand", width: 195, align: "right" as const,
               render: (v: number, row: Item) => (
                 <span>
                   <Text strong={v > 0} type={v === 0 ? "secondary" : undefined}>{v} 箱</Text>
@@ -276,13 +291,13 @@ export default function StockPage() {
               ),
             },
             {
-              title: "批次", dataIndex: "open_lots", width: 80, align: "right" as const,
+              title: "批次", dataIndex: "open_lots", width: 90, align: "right" as const,
               render: (v: number) => (v > 0 ? `${v} 批` : <Text type="secondary">—</Text>),
             },
             {
               // The point of the whole screen: not just how much, but which box
               // next — and by the same rule the issuing screen enforces.
-              title: "下一個該領", width: 190,
+              title: "下一個該領", width: 215,
               render: (_, item: Item) => {
                 const drawable = (lotsByItem.get(item.id) ?? [])
                   .filter((l) => l.qty_on_hand > 0 && l.verdict !== "不合格");
@@ -302,11 +317,11 @@ export default function StockPage() {
               },
             },
             {
-              title: "最近進貨", dataIndex: "last_receipt_date", width: 120,
+              title: "最近進貨", dataIndex: "last_receipt_date", width: 135,
               render: (v: string | null) => v ?? <Text type="secondary">—</Text>,
             },
             {
-              title: "狀態", width: 150,
+              title: "狀態", width: 170,
               render: (_, item: Item) => {
                 const tags = [];
                 if (item.safety_stock > 0 && item.on_hand < item.safety_stock) {

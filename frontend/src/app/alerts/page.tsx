@@ -44,7 +44,7 @@ export default function AlertsPage() {
               title="驗收不合格待處理"
               value={data.rejected.length}
               suffix="批"
-              valueStyle={data.rejected.length ? { color: "#ff4d4f" } : undefined}
+              styles={data.rejected.length ? { content: { color: "#ff4d4f" } } : undefined}
             />
           </Col>
         </Row>
