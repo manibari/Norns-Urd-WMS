@@ -13,6 +13,7 @@
 import { Alert, Button, Card, Col, Form, InputNumber, Radio, Row, Space, Tabs, Typography, message } from "antd";
 import { useCallback, useEffect, useState } from "react";
 import CameraSettingsPanel from "@/components/CameraSettingsPanel";
+import UsersPanel from "@/components/UsersPanel";
 import { useAuth } from "@/components/AuthGate";
 import { api } from "@/lib/api";
 
@@ -34,6 +35,10 @@ export default function SettingsPage() {
           items={[
             { key: "vision", label: "影像設定", children: <VisionSettings readOnly={readOnly} /> },
             { key: "alerts", label: "提醒門檻", children: <AlertSettings readOnly={readOnly} /> },
+            // 只有 admin 看得到；不是靠藏選單把關，伺服器端每個端點各自檢查
+            ...(can("user.manage")
+              ? [{ key: "users", label: "人員與權限", children: <UsersPanel /> }]
+              : []),
           ]}
         />
       </Card>
