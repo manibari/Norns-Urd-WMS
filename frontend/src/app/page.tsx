@@ -22,8 +22,8 @@
 
 import { ArrowRightOutlined, PlusOutlined } from "@ant-design/icons";
 import {
-  Alert, AutoComplete, Button, Card, Col, DatePicker, Divider, Empty, Form, Input,
-  InputNumber, Row, Segmented, Table, Tag, Typography, message,
+  Alert, AutoComplete, Button, Card, Checkbox, Col, DatePicker, Divider, Empty, Form, Input,
+  InputNumber, Radio, Row, Segmented, Table, Tag, Typography, message,
 } from "antd";
 import dayjs from "dayjs";
 import Link from "next/link";
@@ -31,6 +31,11 @@ import { useCallback, useEffect, useState } from "react";
 import { api, type Item, type Lot } from "@/lib/api";
 
 const { Title, Text } = Typography;
+
+// The form's 檢驗項目 block. 規格尺寸 is a tick ("matches spec"), not a value —
+// only unusual items get an actual dimension written in, which is why this is a
+// checklist rather than five text fields.
+const INSPECTION = ["規格尺寸", "標示製造日期", "標示有效日期", "外觀", "顏色"] as const;
 
 export default function ReceivingPage() {
   const [items, setItems] = useState<Item[]>([]);
@@ -44,6 +49,10 @@ export default function ReceivingPage() {
   const rate = Form.useWatch("meters_per_box", form) as number | undefined;
   const metres = Form.useWatch("qty_meters", form) as number | undefined;
   const chosenCode = (Form.useWatch("item_code", form) as string | undefined)?.trim();
+  const verdict = Form.useWatch("verdict", form) as string | undefined;
+  const recordedBy = (Form.useWatch("recorded_by", form) as string | undefined)?.trim();
+  const confirmedBy = (Form.useWatch("confirmed_by", form) as string | undefined)?.trim();
+  const sameSigner = Boolean(recordedBy && confirmedBy && recordedBy === confirmedBy);
 
   // Preview only — the server does the authoritative conversion. Shown live so
   // the remainder is visible before submitting, not discovered afterwards.
@@ -100,6 +109,15 @@ export default function ReceivingPage() {
         receipt_date: dayjs(values.receipt_date).format("YYYY-MM-DD"),
         manufacture_date: values.manufacture_date ? dayjs(values.manufacture_date).format("YYYY-MM-DD") : null,
         supplier: values.supplier || null,
+        expiry_date: values.expiry_date ? dayjs(values.expiry_date).format("YYYY-MM-DD") : null,
+        entered_unit: qtyMode,
+        inspection: Object.fromEntries(
+          INSPECTION.map((k) => [k, (values.inspection ?? []).includes(k)]),
+        ),
+        verdict: values.verdict ?? null,
+        recorded_by: values.recorded_by || null,
+        confirmed_by: values.confirmed_by || null,
+        remark: values.remark || null,
         supplier_lot_code: values.supplier_lot_code || null,
         supplier_code: values.supplier_code || null,
         meters_per_box: values.meters_per_box ?? null,
@@ -109,6 +127,12 @@ export default function ReceivingPage() {
         `${res.created_item ? "已新增品項並建立批次" : "已建立批次"}：${res.qty} 箱（進貨日 ${res.receipt_date}）`,
       );
       if (res.conversion_note) message.warning(res.conversion_note, 8);
+      if (res.verdict === "不合格") {
+        message.warning("判定不合格：已留紀錄，但不計入可領用庫存，也不會被 FIFO 指到。", 8);
+      }
+      if (res.same_signer) {
+        message.warning("記錄人與確認人是同一個人 —— 雙簽的意義就是兩個人，請確認。", 8);
+      }
       if (res.same_day_lot_exists) {
         message.warning("同料號同進貨日已有另一批，這次另開一批。要合併請自行調整。", 6);
       }
@@ -228,13 +252,72 @@ export default function ReceivingPage() {
               </Form.Item>
             </Col>
             <Col xs={24} md={6}>
-              <Form.Item name="manufacture_date" label="製造日（標籤）">
+              <Form.Item name="manufacture_date" label="標示（製造日期）">
+                <DatePicker style={{ width: "100%" }} />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={6}>
+              <Form.Item
+                name="expiry_date"
+                label="標示（有效日期）"
+                extra="多數包材沒標，留空是正常的"
+              >
                 <DatePicker style={{ width: "100%" }} />
               </Form.Item>
             </Col>
             <Col xs={24} md={6}>
               <Form.Item name="supplier_lot_code" label="原廠批號 ROLL#">
                 <Input placeholder="例 20250915-3081*61" />
+              </Form.Item>
+            </Col>
+          </Row>
+
+          <Divider orientation="left" plain>
+            <Text type="secondary">檢驗項目</Text>
+          </Divider>
+          <Row gutter={24}>
+            <Col xs={24} md={14}>
+              <Form.Item name="inspection" label="逐項確認">
+                <Checkbox.Group options={INSPECTION as unknown as string[]} />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={4}>
+              <Form.Item name="verdict" label="判定">
+                <Radio.Group buttonStyle="solid">
+                  <Radio.Button value="合格">合格</Radio.Button>
+                  <Radio.Button value="不合格">不合格</Radio.Button>
+                </Radio.Group>
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={6}>
+              <Form.Item name="remark" label="備註">
+                <Input placeholder="不合格請寫原因" />
+              </Form.Item>
+            </Col>
+          </Row>
+          {verdict === "不合格" && (
+            <Alert
+              type="warning"
+              title="判定不合格：會留紀錄，但不進可領用庫存"
+              description="這批仍然存在系統裡（誰收的、什麼時候、為什麼不合格），只是不計入在庫、FIFO 不會指到它、也領不出來。請在備註寫原因。"
+              style={{ marginBottom: 16 }}
+            />
+          )}
+
+          <Row gutter={24}>
+            <Col xs={24} md={6}>
+              <Form.Item name="recorded_by" label="記錄人">
+                <Input placeholder="填單的人" />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={6}>
+              <Form.Item
+                name="confirmed_by"
+                label="確認人"
+                validateStatus={sameSigner ? "warning" : undefined}
+                help={sameSigner ? "跟記錄人同一個人" : undefined}
+              >
+                <Input placeholder="覆核的人" />
               </Form.Item>
             </Col>
           </Row>
@@ -320,6 +403,15 @@ export default function ReceivingPage() {
               ),
             },
             { title: "製造日", dataIndex: "manufacture_date", render: (v) => v ?? "—" },
+            { title: "有效日", dataIndex: "expiry_date", render: (v) => v ?? "—" },
+            {
+              title: "判定",
+              dataIndex: "verdict",
+              render: (v: string | null) =>
+                v === "不合格" ? <Tag color="red">不合格</Tag>
+                  : v === "合格" ? <Tag color="green">合格</Tag>
+                  : <Text type="secondary">—</Text>,
+            },
             { title: "原廠批號", dataIndex: "supplier_lot_code", render: (v) => v ?? "—" },
             {
               title: "在庫",

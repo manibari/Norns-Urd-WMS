@@ -28,6 +28,69 @@ class Decision(str, Enum):
     DEFER = "defer"
 
 
+class ItemDeferReason(str, Enum):
+    NO_CODE_READ = "no_code_read"        # label code unreadable
+    NO_ITEM_MATCH = "no_item_match"      # read a code, nothing in the master matches
+    AMBIGUOUS_ITEM = "ambiguous_item"    # more than one 型號 could be it
+
+
+@dataclass(frozen=True)
+class ItemMatch:
+    decision: Decision
+    item_code: str | None
+    matched_on: str | None = None        # "supplier_code" | "model_in_label"
+    reason: ItemDeferReason | None = None
+    contenders: tuple[str, ...] = ()
+
+    @property
+    def locked(self) -> bool:
+        return self.decision is Decision.LOCK
+
+
+def _compact(value: str) -> str:
+    return value.upper().replace("-", "").replace(".", "").replace(" ", "").replace("_", "")
+
+
+def match_item_code(label_code: str | None, items: list[tuple[str, str | None]]) -> ItemMatch:
+    """Work out which 型號 a label belongs to.
+
+    `items` is (型號, 箱上完整料號). The label carries the long supplier code
+    (`2003.T7320BC-340X900-P1`); people work in 型號 (`T7320BC`).
+
+    Same discipline as the lot matcher: lock only on a unique answer. Two 型號
+    like `T6050B` and `T6050BSW` both sit inside the same label string, and
+    picking the first one silently draws stock from the wrong item — so an
+    ambiguous read defers to a human instead of guessing.
+    """
+    if not label_code or not label_code.strip():
+        return ItemMatch(Decision.DEFER, None, reason=ItemDeferReason.NO_CODE_READ)
+
+    label = _compact(label_code)
+
+    exact = [code for code, supplier_code in items if supplier_code and _compact(supplier_code) == label]
+    if len(exact) == 1:
+        return ItemMatch(Decision.LOCK, exact[0], matched_on="supplier_code")
+    if len(exact) > 1:
+        return ItemMatch(Decision.DEFER, None, reason=ItemDeferReason.AMBIGUOUS_ITEM,
+                         contenders=tuple(exact))
+
+    # Fall back to finding the 型號 inside the label string. Prefer the longest
+    # match: `T6050BSW` beats `T6050B` on a label containing both, because the
+    # longer one is the more specific reading, not a coincidence.
+    contained = [code for code, _ in items if _compact(code) and _compact(code) in label]
+    if not contained:
+        return ItemMatch(Decision.DEFER, None, reason=ItemDeferReason.NO_ITEM_MATCH)
+    if len(contained) == 1:
+        return ItemMatch(Decision.LOCK, contained[0], matched_on="model_in_label")
+
+    longest = max(len(_compact(c)) for c in contained)
+    best = [c for c in contained if len(_compact(c)) == longest]
+    if len(best) == 1:
+        return ItemMatch(Decision.LOCK, best[0], matched_on="model_in_label")
+    return ItemMatch(Decision.DEFER, None, reason=ItemDeferReason.AMBIGUOUS_ITEM,
+                     contenders=tuple(sorted(contained)))
+
+
 class DeferReason(str, Enum):
     NO_RECOGNITION = "no_recognition"          # model returned nothing usable
     LOW_CONFIDENCE = "low_confidence"          # below the configured threshold

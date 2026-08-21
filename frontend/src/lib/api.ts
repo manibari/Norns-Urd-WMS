@@ -6,8 +6,16 @@ export type Lot = {
   manufacture_date: string | null;
   supplier_lot_code: string | null;
   supplier: string | null;
-  /** 驗收單上填的米數原值，保留供稽核比對 */
+  /** 驗收單上填的數量原值，保留供稽核比對 */
   entered_meters: number | null;
+  entered_unit: string | null;
+  expiry_date: string | null;
+  inspection: Record<string, boolean | null>;
+  /** 合格 | 不合格。不合格不計入在庫、FIFO 不指、領不出來 */
+  verdict: string | null;
+  recorded_by: string | null;
+  confirmed_by: string | null;
+  remark: string | null;
   qty_on_hand: number;
   is_fifo_next: boolean;
 };
@@ -21,6 +29,7 @@ export type Item = {
   safety_stock: number;
   /** 每箱米數。null = 此品項不用米數換算 */
   meters_per_box: number | null;
+  rejected_qty: number;
   /** 箱上標籤的完整料號，影像辨識對映用 */
   supplier_code: string | null;
   supplier: string | null;
@@ -30,10 +39,27 @@ export type Item = {
   open_lots: number;
 };
 
+export type CatalogueEntry = {
+  item_code: string;
+  name: string;
+  spec: string | null;
+  meters_per_box: number | null;
+  on_hand: number;
+};
+
 export type Proposal = {
   image_path: string;
-  item_code: string;
+  /** 由影像判定的型號。辨識不出時為 null，此時要人工選 */
+  item_code: string | null;
   item_name: string | null;
+  item_match: {
+    decision: "lock" | "defer";
+    item_code: string | null;
+    matched_on: "supplier_code" | "model_in_label" | "manual" | null;
+    reason: "no_code_read" | "no_item_match" | "ambiguous_item" | null;
+    contenders: string[];
+  };
+  catalogue: CatalogueEntry[];
   recognition: {
     receipt_date: string | null;
     manufacture_date: string | null;
@@ -45,7 +71,6 @@ export type Proposal = {
   };
   candidates: { lot_id: number; receipt_date: string; manufacture_date: string | null; qty_on_hand: number }[];
   /** 標籤讀到的料號跟所選型號對不對得上。null = 讀不到料號，無從判斷 */
-  item_code_matches: boolean | null;
   expected_supplier_code: string | null;
   decision: "lock" | "defer";
   defer_reason: string | null;
@@ -83,6 +108,7 @@ export type Alerts = {
   stale: (Lot & { age_days: number; name: string })[];
   low_stock: { item_code: string; name: string; safety_stock: number; on_hand: number }[];
   pending_detail: { id: number; item_code: string; captured_at: string }[];
+  rejected: (Lot & { name: string })[];
 };
 
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
@@ -112,6 +138,8 @@ export const api = {
       same_day_lot_exists: boolean;
       qty: number;
       conversion_note: string | null;
+      verdict: string | null;
+      same_signer: boolean;
     }>("/api/lots", json(body)),
   patchItem: (code: string, body: Record<string, unknown>) =>
     req<Record<string, unknown>>(`/api/items/${encodeURIComponent(code)}`, {
@@ -119,12 +147,15 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }),
-  recognize: (itemCode: string, file: File) => {
+  /** 只傳影像：型號與批次都由辨識判定 */
+  recognize: (file: File) => {
     const form = new FormData();
-    form.append("item_code", itemCode);
     form.append("image", file);
     return req<Proposal>("/api/recognize", { method: "POST", body: form });
   },
+  /** 辨識不出型號時，人工指定後重新比對批次（不重跑辨識、不重複計費） */
+  resolveItem: (itemCode: string, ocrReceiptDate: string | null) =>
+    req<Partial<Proposal>>("/api/resolve-item", json({ item_code: itemCode, ocr_receipt_date: ocrReceiptDate })),
   createScan: (body: Record<string, unknown>) =>
     req<{ id: number; status: Scan["status"]; fifo_expected_date?: string }>("/api/scans", json(body)),
   scans: (status?: string) => req<Scan[]>(`/api/scans${status ? `?status=${status}` : ""}`),

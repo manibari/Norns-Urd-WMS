@@ -39,12 +39,43 @@ export default function AlertsPage() {
           <Col xs={12} md={6}><Statistic title="呆滯批次" value={data.stale.length} suffix="批" /></Col>
           <Col xs={12} md={6}><Statistic title="低於安全水位" value={data.low_stock.length} suffix="項" /></Col>
           <Col xs={12} md={6}><Statistic title="包裝產品待補" value={data.pending_detail.length} suffix="筆" /></Col>
+          <Col xs={12} md={6}>
+            <Statistic
+              title="驗收不合格待處理"
+              value={data.rejected.length}
+              suffix="批"
+              valueStyle={data.rejected.length ? { color: "#ff4d4f" } : undefined}
+            />
+          </Col>
         </Row>
         <Text type="secondary" style={{ display: "block", marginTop: 16 }}>
           <CheckCircleOutlined style={{ color: "#52c41a", marginRight: 6 }} />
           最後檢查 {data.checked_at.slice(0, 19).replace("T", " ")}
           ｜門檻：效期 {data.thresholds.expiry_days} 天內、呆滯 {data.thresholds.stale_days} 天、
           明細待補 {data.thresholds.pending_hours} 小時
+          ｜到期日以包材標示為準，沒標示才用製造日＋保存期限推算
+        </Text>
+      </Card>
+
+      <Card title="驗收不合格待處理" style={{ marginTop: 24 }}>
+        <Table
+          rowKey="id"
+          size="middle"
+          pagination={false}
+          dataSource={data.rejected}
+          locale={empty("沒有不合格批次")}
+          columns={[
+            { title: "型號", dataIndex: "item_code" },
+            { title: "原物料名稱", dataIndex: "name" },
+            { title: "廠商", dataIndex: "supplier", render: (v) => v ?? "—" },
+            { title: "進貨日", dataIndex: "receipt_date" },
+            { title: "數量", dataIndex: "qty_on_hand", align: "right" as const },
+            { title: "原因", dataIndex: "remark", render: (v) => v ?? "—" },
+            { title: "記錄／確認", render: (_, row) => `${row.recorded_by ?? "—"}／${row.confirmed_by ?? "—"}` },
+          ]}
+        />
+        <Text type="secondary" style={{ display: "block", marginTop: 12 }}>
+          這些批次還在架上但不計入在庫、FIFO 不會指到、也領不出來。退貨或報廢後仍會留著紀錄。
         </Text>
       </Card>
 
@@ -59,7 +90,15 @@ export default function AlertsPage() {
             { title: "品名", dataIndex: "name" },
             { title: "進貨日", dataIndex: "receipt_date" },
             { title: "製造日", dataIndex: "manufacture_date" },
-            { title: "到期日", dataIndex: "expires_on" },
+            {
+              title: "到期日",
+              dataIndex: "expires_on",
+              render: (v: string, row: { expiry_source?: string }) => (
+                <span>
+                  {v} <Tag color={row.expiry_source === "標示" ? "blue" : "default"}>{row.expiry_source}</Tag>
+                </span>
+              ),
+            },
             {
               title: "剩餘",
               dataIndex: "days_left",

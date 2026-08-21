@@ -21,7 +21,9 @@ from pydantic import BaseModel
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "core"))
 
-from urdwms_core.matching import Candidate, fifo_expected, match_candidates  # noqa: E402
+from urdwms_core.matching import (  # noqa: E402
+    Candidate, fifo_expected, match_candidates, match_item_code,
+)
 from urdwms_core.normalize import normalize_item_code, to_date_key  # noqa: E402
 from urdwms_core.recognition import GeminiProvider, Recognition  # noqa: E402
 from urdwms_core.units import boxes_from_meters, meters_from_boxes  # noqa: E402
@@ -50,8 +52,11 @@ def startup() -> None:
 # --------------------------------------------------------------------------- helpers
 
 def _candidates(conn, item_code: str) -> list[Candidate]:
+    # A rejected lot is not a candidate. It stays on the books (the record is the
+    # deliverable) but FIFO must never point anyone at it, and nobody may draw it.
     rows = conn.execute(
-        "SELECT id, receipt_date FROM inventory_lot WHERE item_code = ? AND qty_on_hand > 0"
+        "SELECT id, receipt_date FROM inventory_lot"
+        " WHERE item_code = ? AND qty_on_hand > 0 AND COALESCE(verdict, '合格') <> '不合格'"
         " ORDER BY receipt_date",
         (item_code,),
     ).fetchall()
@@ -101,6 +106,14 @@ class LotIn(BaseModel):
     safety_stock: int = 0
     meters_per_box: int | None = None
     supplier_code: str | None = None    # 箱上完整料號, 辨識對映用
+    expiry_date: str | None = None      # 標示(有效日期). 多數包材沒有
+    entered_unit: str = "米"
+    # 檢驗項目: 規格尺寸 / 標示製造日期 / 標示有效日期 / 外觀 / 顏色
+    inspection: dict = {}
+    verdict: str | None = None          # 合格 | 不合格
+    recorded_by: str | None = None
+    confirmed_by: str | None = None
+    remark: str | None = None
     # The acceptance form records quantity in metres, so this is the normal path
     # rather than an option. Converted to whole boxes; boxes remain the ledger
     # unit (units.py).
@@ -157,8 +170,15 @@ def health() -> dict:
 def items() -> list[dict]:
     with transaction() as conn:
         rows = conn.execute(
-            "SELECT i.*, COALESCE(SUM(l.qty_on_hand), 0) AS on_hand,"
-            "       COUNT(CASE WHEN l.qty_on_hand > 0 THEN 1 END) AS open_lots"
+            # "在庫" means drawable. A rejected lot is physically present but must
+            # never be counted as available, or FIFO and the low-stock alert both
+            # end up reasoning about stock nobody is allowed to touch.
+            "SELECT i.*,"
+            " COALESCE(SUM(CASE WHEN COALESCE(l.verdict,'合格') <> '不合格' THEN l.qty_on_hand ELSE 0 END), 0)"
+            "   AS on_hand,"
+            " COUNT(CASE WHEN l.qty_on_hand > 0 AND COALESCE(l.verdict,'合格') <> '不合格' THEN 1 END)"
+            "   AS open_lots,"
+            " COALESCE(SUM(CASE WHEN l.verdict = '不合格' THEN l.qty_on_hand ELSE 0 END), 0) AS rejected_qty"
             " FROM inventory_item i LEFT JOIN inventory_lot l ON l.item_code = i.item_code"
             " GROUP BY i.item_code ORDER BY i.item_code",
         ).fetchall()
@@ -219,6 +239,7 @@ def lots(item_code: str | None = None) -> list[dict]:
     for row in rows:
         expected = fifo_expected(by_item.get(row["item_code"], []))
         row["is_fifo_next"] = str(row["id"]) in expected
+        row["inspection"] = json.loads(row.get("inspection") or "{}")
     return rows
 
 
@@ -234,6 +255,9 @@ def create_lot(payload: LotIn) -> dict:
         raise HTTPException(400, "數量至少 1 箱")
 
     manufacture = to_date_key(payload.manufacture_date) if payload.manufacture_date else None
+    expiry = to_date_key(payload.expiry_date) if payload.expiry_date else None
+    if payload.verdict not in (None, "合格", "不合格"):
+        raise HTTPException(400, "判定只能是合格或不合格")
     item_code = payload.item_code.strip()
     if not item_code:
         raise HTTPException(400, "料號不可空白")
@@ -294,21 +318,34 @@ def create_lot(payload: LotIn) -> dict:
             qty = conversion.boxes
 
         cursor = conn.execute(
-            "INSERT INTO inventory_lot (item_code, receipt_date, manufacture_date, supplier_lot_code,"
-            " supplier, entered_meters, qty_on_hand, created_at, created_by)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO inventory_lot (item_code, receipt_date, manufacture_date, expiry_date,"
+            " supplier_lot_code, supplier, entered_meters, entered_unit, inspection, verdict,"
+            " recorded_by, confirmed_by, remark, qty_on_hand, created_at, created_by)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (item_code, parsed.iso, manufacture.iso if manufacture else None,
-             payload.supplier_lot_code, payload.supplier, payload.qty_meters, qty, now(), DEMO_USER),
+             expiry.iso if expiry else None, payload.supplier_lot_code, payload.supplier,
+             payload.qty_meters, payload.entered_unit,
+             json.dumps(payload.inspection, ensure_ascii=False), payload.verdict,
+             payload.recorded_by, payload.confirmed_by, payload.remark, qty, now(), DEMO_USER),
         )
         lot_id = cursor.lastrowid
         log(conn, DEMO_USER, "lot.create",
             {"lot_id": lot_id, "item_code": item_code, "receipt_date": parsed.iso, "qty": qty,
-             "entered_meters": payload.qty_meters})
+             "entered": payload.qty_meters, "verdict": payload.verdict,
+             "recorded_by": payload.recorded_by, "confirmed_by": payload.confirmed_by})
     return {
         "id": lot_id,
         "receipt_date": parsed.iso,
         "created_item": created_item,
         "qty": qty,
+        "verdict": payload.verdict,
+        # Dual sign-off exists so one person cannot both book and approve. Same
+        # name in both boxes is reported, not blocked — blocking would just get
+        # a second name borrowed, and then the record lies (cf. risk R2).
+        "same_signer": bool(
+            payload.recorded_by and payload.confirmed_by
+            and payload.recorded_by.strip() == payload.confirmed_by.strip()
+        ),
         # Surfaced, never rounded away: metres that do not divide into whole
         # boxes are a real discrepancy the warehouse should see (units.py).
         "conversion_note": conversion.note if conversion else None,
@@ -321,12 +358,20 @@ def create_lot(payload: LotIn) -> dict:
 # --------------------------------------------------------------------------- recognition
 
 @app.post("/api/recognize")
-async def recognize(item_code: str = Form(...), image: UploadFile = File(...)) -> dict:
-    """Recognise a box, then match it against what is actually in stock.
+async def recognize(image: UploadFile = File(...), item_code: str | None = Form(default=None)) -> dict:
+    """Recognise a box: which 型號 it is, and which lot.
 
-    Returns a proposal only — nothing is written and no stock moves. The operator
-    confirms on screen, because "this is not the box I picked up" has no other
-    line of defence (M7 architecture, constraint 4).
+    Both identifications come from the photo. The operator picks a 型號 only
+    when recognition cannot (`item_match.decision == "defer"`), which is the
+    same fallback shape as the lot matcher — one rule, one failure mode, one
+    thing to explain on the floor.
+
+    Passing `item_code` overrides the label reading; that is the path used when
+    the operator has already resolved a deferral.
+
+    Nothing is written and no stock moves. The confirmation step stays because
+    "this is not the box I picked up" has no other line of defence
+    (M7 architecture, constraint 4).
     """
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
     suffix = Path(image.filename or "capture.jpg").suffix or ".jpg"
@@ -339,47 +384,73 @@ async def recognize(item_code: str = Form(...), image: UploadFile = File(...)) -
         reading = Recognition(error=str(exc))
 
     with transaction() as conn:
-        candidates = _candidates(conn, item_code)
-        item = conn.execute("SELECT * FROM inventory_item WHERE item_code = ?", (item_code,)).fetchone()
-        lot_rows = {str(r["id"]): dict(r) for r in conn.execute(
-            "SELECT * FROM inventory_lot WHERE item_code = ? AND qty_on_hand > 0", (item_code,)).fetchall()}
+        master = [(r["item_code"], r["supplier_code"]) for r in conn.execute(
+            "SELECT item_code, supplier_code FROM inventory_item").fetchall()]
+        catalogue = [dict(r) for r in conn.execute(
+            "SELECT i.item_code, i.name, i.spec, i.meters_per_box,"
+            "       COALESCE(SUM(CASE WHEN COALESCE(l.verdict, '合格') <> '不合格'"
+            "                          THEN l.qty_on_hand ELSE 0 END), 0) AS on_hand"
+            " FROM inventory_item i LEFT JOIN inventory_lot l ON l.item_code = i.item_code"
+            " GROUP BY i.item_code ORDER BY i.item_code").fetchall()]
 
-    result = match_candidates(to_date_key(reading.receipt_date), candidates)
-
-    # Cross-check the code on the label against the 型號 the operator picked.
-    # The label carries the long supplier code, the operator picked a short 型號,
-    # so this compares through the item's mapping (requirement 4). Only a
-    # confident mismatch is reported — an unreadable code is not evidence of
-    # anything, and a false warning here trains people to ignore the real one.
-    label_code = normalize_item_code(reading.item_code, {}) if reading.item_code else None
-    expected_long = (item["supplier_code"] or "").upper() if item else ""
-    code_matches: bool | None = None
-    if label_code and (expected_long or item_code):
-        compact = label_code.replace("-", "").replace(".", "").replace(" ", "")
-        code_matches = any(
-            compact and compact in ref.upper().replace("-", "").replace(".", "").replace(" ", "")
-            or ref.upper().replace("-", "").replace(".", "").replace(" ", "") in compact
-            for ref in filter(None, (expected_long, item_code))
-        )
+    item_match = match_item_code(reading.item_code, master)
+    resolved = item_code or (item_match.item_code if item_match.locked else None)
 
     payload: dict = {
         "image_path": f"/uploads/{path.name}",
-        "item_code": item_code,
-        "item_name": item["name"] if item else None,
         "recognition": {
             "receipt_date": reading.receipt_date,
             "manufacture_date": reading.manufacture_date,
             "item_code": reading.item_code,
             "confidence": reading.receipt_date_confidence,
+            "item_code_confidence": reading.item_code_confidence,
             "stamp_visible": reading.stamp_visible,
             "notes": reading.notes,
             "error": reading.error,
         },
-        "item_code_matches": code_matches,
+        "item_match": {
+            "decision": "lock" if resolved else "defer",
+            "item_code": resolved,
+            # Distinguishes "the label said so" from "a human overrode it",
+            # which matters when reading the record back months later.
+            "matched_on": item_match.matched_on if item_match.locked and not item_code else
+                          ("manual" if item_code else None),
+            "reason": item_match.reason.value if item_match.reason and not resolved else None,
+            "contenders": list(item_match.contenders),
+        },
+        # Sent along so a deferral can be resolved without a second round trip.
+        "catalogue": catalogue,
+    }
+
+    if resolved is None:
+        payload.update({"item_code": None, "item_name": None, "candidates": [],
+                        "decision": "defer", "defer_reason": "item_unresolved",
+                        "match_distance": None, "locked_lot": None,
+                        "fifo_ok": None, "fifo_expected_date": None})
+        return payload
+
+    payload.update(_lot_lookup(resolved, reading.receipt_date))
+    return payload
+
+
+def _lot_lookup(item_code: str, read_receipt_date: str | None) -> dict:
+    """Match a read receipt date against the item's drawable lots, and judge FIFO."""
+    with transaction() as conn:
+        candidates = _candidates(conn, item_code)
+        item = conn.execute("SELECT * FROM inventory_item WHERE item_code = ?", (item_code,)).fetchone()
+        lot_rows = {str(r["id"]): dict(r) for r in conn.execute(
+            "SELECT * FROM inventory_lot WHERE item_code = ? AND qty_on_hand > 0"
+            " AND COALESCE(verdict, '合格') <> '不合格'", (item_code,)).fetchall()}
+
+    result = match_candidates(to_date_key(read_receipt_date), candidates)
+    out: dict = {
+        "item_code": item_code,
+        "item_name": item["name"] if item else None,
         "expected_supplier_code": item["supplier_code"] if item else None,
         "candidates": [
             {"lot_id": int(c.lot_id), "receipt_date": c.receipt_date,
              "manufacture_date": lot_rows.get(c.lot_id, {}).get("manufacture_date"),
+             "expiry_date": lot_rows.get(c.lot_id, {}).get("expiry_date"),
              "qty_on_hand": lot_rows.get(c.lot_id, {}).get("qty_on_hand")}
             for c in candidates
         ],
@@ -387,24 +458,41 @@ async def recognize(item_code: str = Form(...), image: UploadFile = File(...)) -
         "defer_reason": result.reason.value if result.reason else None,
         "match_distance": result.best_distance,
     }
-
     if not result.locked:
-        # Not a failure — the常駐 fallback (US-4). The operator picks from the
-        # candidate list and the draw still goes through the FIFO check.
-        payload["locked_lot"] = None
-        payload["fifo_ok"] = None
-        payload["fifo_expected_date"] = None
-        return payload
+        return {**out, "locked_lot": None, "fifo_ok": None, "fifo_expected_date": None}
 
     ok, expected_date = _fifo_verdict(candidates, result.lot_id or "")
     locked = lot_rows.get(result.lot_id or "", {})
-    payload["locked_lot"] = {
-        "lot_id": int(result.lot_id), "receipt_date": locked.get("receipt_date"),
-        "manufacture_date": locked.get("manufacture_date"), "qty_on_hand": locked.get("qty_on_hand"),
+    return {
+        **out,
+        "locked_lot": {
+            "lot_id": int(result.lot_id), "receipt_date": locked.get("receipt_date"),
+            "manufacture_date": locked.get("manufacture_date"),
+            "qty_on_hand": locked.get("qty_on_hand"),
+        },
+        "fifo_ok": ok,
+        "fifo_expected_date": expected_date,
     }
-    payload["fifo_ok"] = ok
-    payload["fifo_expected_date"] = expected_date
-    return payload
+
+
+class ResolveIn(BaseModel):
+    item_code: str
+    ocr_receipt_date: str | None = None
+
+
+@app.post("/api/resolve-item")
+def resolve_item(payload: ResolveIn) -> dict:
+    """Re-run the lot match after a human picks the 型號 recognition could not.
+
+    Deliberately does not touch the image: recognition already ran and is
+    billed. Re-uploading to change one field would cost a second call and could
+    return a *different* reading, which would be confusing on screen.
+    """
+    return {
+        **_lot_lookup(payload.item_code, payload.ocr_receipt_date),
+        "item_match": {"decision": "lock", "item_code": payload.item_code,
+                       "matched_on": "manual", "reason": None, "contenders": []},
+    }
 
 
 # --------------------------------------------------------------------------- issuing
@@ -536,19 +624,31 @@ def alerts() -> dict:
     """
     today = date.today()
     stale_days, expiry_days, pending_hours = 120, 60, 24
-    out: dict[str, list] = {"expiring": [], "stale": [], "low_stock": [], "pending_detail": []}
+    out: dict[str, list] = {"expiring": [], "stale": [], "low_stock": [], "pending_detail": [],
+                            "rejected": []}
 
     with transaction() as conn:
         for row in conn.execute(
             "SELECT l.*, i.name, i.shelf_life_days FROM inventory_lot l"
-            " JOIN inventory_item i ON i.item_code = l.item_code WHERE l.qty_on_hand > 0"
+            " JOIN inventory_item i ON i.item_code = l.item_code"
+            " WHERE l.qty_on_hand > 0 AND COALESCE(l.verdict, '合格') <> '不合格'"
         ).fetchall():
             lot = dict(row)
-            if lot["shelf_life_days"] and lot["manufacture_date"]:
+            # The acceptance form has a 標示(有效日期) column. When the supplier
+            # printed a date, use it — an inferred date is a fallback for the
+            # (common) case where the label carries no expiry at all.
+            expires = None
+            source = None
+            if lot["expiry_date"]:
+                expires, source = date.fromisoformat(lot["expiry_date"]), "標示"
+            elif lot["shelf_life_days"] and lot["manufacture_date"]:
                 expires = date.fromisoformat(lot["manufacture_date"]) + timedelta(days=lot["shelf_life_days"])
+                source = "推算"
+            if expires:
                 remaining = (expires - today).days
                 if remaining <= expiry_days:
-                    out["expiring"].append({**lot, "expires_on": expires.isoformat(), "days_left": remaining})
+                    out["expiring"].append({**lot, "expires_on": expires.isoformat(),
+                                            "days_left": remaining, "expiry_source": source})
             age = (today - date.fromisoformat(lot["receipt_date"])).days
             if age >= stale_days:
                 out["stale"].append({**lot, "age_days": age})
@@ -556,9 +656,16 @@ def alerts() -> dict:
         for row in conn.execute(
             "SELECT i.item_code, i.name, i.safety_stock, COALESCE(SUM(l.qty_on_hand), 0) AS on_hand"
             " FROM inventory_item i LEFT JOIN inventory_lot l ON l.item_code = i.item_code"
+            "   AND COALESCE(l.verdict, '合格') <> '不合格'"
             " WHERE i.safety_stock > 0 GROUP BY i.item_code HAVING on_hand < i.safety_stock"
         ).fetchall():
             out["low_stock"].append(dict(row))
+
+        for row in conn.execute(
+            "SELECT l.*, i.name FROM inventory_lot l JOIN inventory_item i ON i.item_code = l.item_code"
+            " WHERE l.verdict = '不合格' AND l.qty_on_hand > 0"
+        ).fetchall():
+            out["rejected"].append(dict(row))
 
         cutoff = (datetime.now() - timedelta(hours=pending_hours)).isoformat(timespec="seconds")
         for row in conn.execute(

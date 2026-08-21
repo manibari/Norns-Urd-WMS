@@ -45,7 +45,16 @@ CREATE TABLE IF NOT EXISTS inventory_lot (
     supplier_lot_code TEXT,
     -- 每批記實際廠商: 同一型號換供應商是真實情況, 驗收單也是每次填.
     supplier          TEXT,
-    entered_meters    INTEGER,        -- 驗收單上填的米數原值, 保留供稽核比對
+    entered_meters    INTEGER,        -- 驗收單上填的數量原值, 保留供稽核比對
+    entered_unit      TEXT,           -- 米 | 張 | 箱
+    expiry_date       TEXT,           -- 標示(有效日期). 多數包材沒有, 留空是正常的
+    -- 檢驗項目 JSON: 規格尺寸/標示製造日期/標示有效日期/外觀/顏色, 值為 true|false|null
+    inspection        TEXT NOT NULL DEFAULT '{}',
+    verdict           TEXT,           -- 合格 | 不合格. 不合格不進可領用庫存
+    -- 雙簽: 填單的人與確認的人是不同的人, 這是這張單的控制點所在
+    recorded_by       TEXT,
+    confirmed_by      TEXT,
+    remark            TEXT,
     qty_on_hand       INTEGER NOT NULL,
     created_at        TEXT NOT NULL,
     created_by        TEXT NOT NULL
@@ -117,6 +126,13 @@ _ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("inventory_item", "supplier", "supplier TEXT"),
     ("inventory_lot", "supplier", "supplier TEXT"),
     ("inventory_lot", "entered_meters", "entered_meters INTEGER"),
+    ("inventory_lot", "entered_unit", "entered_unit TEXT"),
+    ("inventory_lot", "expiry_date", "expiry_date TEXT"),
+    ("inventory_lot", "inspection", "inspection TEXT NOT NULL DEFAULT '{}'"),
+    ("inventory_lot", "verdict", "verdict TEXT"),
+    ("inventory_lot", "recorded_by", "recorded_by TEXT"),
+    ("inventory_lot", "confirmed_by", "confirmed_by TEXT"),
+    ("inventory_lot", "remark", "remark TEXT"),
 )
 
 
