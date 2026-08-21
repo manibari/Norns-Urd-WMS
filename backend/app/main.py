@@ -529,7 +529,14 @@ def health() -> dict:
 
 
 @app.get("/api/items")
-def items(user: dict = Depends(current_user)) -> list[dict]:
+def items(order: str = "sort", user: dict = Depends(current_user)) -> list[dict]:
+    """Item master.
+
+    Two screens want two orders and neither is wrong: the master is arranged by
+    hand (`order=sort`), while stock is most useful with the latest delivery on
+    top (`order=recent`). Sorting client-side instead would mean each screen
+    quietly disagreeing about what "first" means.
+    """
     with transaction() as conn:
         rows = conn.execute(
             # "在庫" means drawable. A rejected lot is physically present but must
@@ -548,7 +555,11 @@ def items(user: dict = Depends(current_user)) -> list[dict]:
             # looking for. Items with no lots yet sort last rather than first,
             # since an empty row at the top is noise.
             " GROUP BY i.id"
-            " ORDER BY last_lot_at IS NULL, last_lot_at DESC, last_receipt_date DESC, i.name",
+            + (" ORDER BY last_lot_at IS NULL, last_lot_at DESC, last_receipt_date DESC, i.name"
+               if order == "recent"
+               # Hand-arranged order; never-arranged rows fall back to id so the
+               # list is always stable rather than arbitrary.
+               else " ORDER BY COALESCE(i.sort_order, i.id)"),
         ).fetchall()
     return [
         {
@@ -562,6 +573,27 @@ def items(user: dict = Depends(current_user)) -> list[dict]:
         }
         for r in rows
     ]
+
+
+class ReorderIn(BaseModel):
+    item_ids: list[int]
+
+
+@app.post("/api/items/reorder")
+def reorder_items(payload: ReorderIn,
+                  user: dict = Depends(requires("item.manage"))) -> dict:
+    """Persist a hand-arranged order for the item master.
+
+    A master list someone maintains gets grouped the way that person thinks —
+    films together, bags together, the thing they touch daily at the top. That
+    grouping is not derivable from any column, so it is stored.
+    """
+    with transaction() as conn:
+        for position, item_id in enumerate(payload.item_ids):
+            conn.execute("UPDATE inventory_item SET sort_order = ? WHERE id = ?",
+                         (position, item_id))
+        log(conn, user["name"], "item.reorder", {"count": len(payload.item_ids)})
+    return {"ok": True, "count": len(payload.item_ids)}
 
 
 @app.get("/api/item-options")
@@ -845,7 +877,7 @@ def create_lot(payload: LotIn, user: dict = Depends(requires("lot.create"))) -> 
                 (payload.item_name.strip(), model, payload.spec, payload.unit,
                  payload.shelf_life_days, payload.safety_stock, payload.meters_per_box,
                  payload.pack_unit, int(bool(payload.has_expiry)),
-                 int(payload.use_recognition if payload.use_recognition is not None else True),
+                 int(bool(model or payload.supplier_code)),
                  payload.supplier_code, payload.supplier),
             )
             item_id = cursor.lastrowid

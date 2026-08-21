@@ -1,7 +1,7 @@
 "use client";
 
 /**
- * Drag-to-resize table columns, with the widths remembered per table.
+ * Drag-to-resize and drag-to-reorder table columns, remembered per table.
  *
  * Remembering is the point. These tables carry a dozen columns behind a
  * horizontal scrollbar, and whoever maintains the master data cares about
@@ -21,27 +21,50 @@ const MIN_WIDTH = 60;
 
 type Widths = Record<string, number>;
 
-function storageKey(tableId: string) {
+function widthKey(tableId: string) {
   return `urdwms.colwidths.${tableId}`;
+}
+
+function orderKey(tableId: string) {
+  return `urdwms.colorder.${tableId}`;
 }
 
 export function useColumnWidths(tableId: string) {
   const [widths, setWidths] = useState<Widths>({});
+  const [order, setOrder] = useState<string[]>([]);
 
   useEffect(() => {
     try {
-      const raw = localStorage.getItem(storageKey(tableId));
+      const raw = localStorage.getItem(widthKey(tableId));
       if (raw) setWidths(JSON.parse(raw));
+      const rawOrder = localStorage.getItem(orderKey(tableId));
+      if (rawOrder) setOrder(JSON.parse(rawOrder));
     } catch {
-      // A corrupt or unavailable store just means default widths.
+      // A corrupt or unavailable store just means defaults.
     }
+  }, [tableId]);
+
+  const moveColumn = useCallback((from: string, to: string, keys: string[]) => {
+    setOrder(() => {
+      const base = keys.slice();
+      const fromIndex = base.indexOf(from);
+      const toIndex = base.indexOf(to);
+      if (fromIndex < 0 || toIndex < 0 || fromIndex === toIndex) return base;
+      base.splice(toIndex, 0, ...base.splice(fromIndex, 1));
+      try {
+        localStorage.setItem(orderKey(tableId), JSON.stringify(base));
+      } catch {
+        // Not persisting is survivable; the move still applies this session.
+      }
+      return base;
+    });
   }, [tableId]);
 
   const setWidth = useCallback((key: string, width: number) => {
     setWidths((prev) => {
       const next = { ...prev, [key]: Math.max(MIN_WIDTH, Math.round(width)) };
       try {
-        localStorage.setItem(storageKey(tableId), JSON.stringify(next));
+        localStorage.setItem(widthKey(tableId), JSON.stringify(next));
       } catch {
         // Not persisting is survivable; the resize still applies this session.
       }
@@ -51,38 +74,102 @@ export function useColumnWidths(tableId: string) {
 
   const reset = useCallback(() => {
     setWidths({});
+    setOrder([]);
     try {
-      localStorage.removeItem(storageKey(tableId));
+      localStorage.removeItem(widthKey(tableId));
+      localStorage.removeItem(orderKey(tableId));
     } catch {
       // ignore
     }
   }, [tableId]);
 
-  /** Apply stored widths, centre content, and attach a drag handle. */
+  /** Apply stored order and widths, centre content, and attach drag handles. */
   function resizable<T>(columns: TableColumnType<T>[]): TableColumnType<T>[] {
-    return columns.map((col, index) => {
-      const key = String(col.key ?? col.dataIndex ?? index);
+    const keyOf = (col: TableColumnType<T>, index: number) =>
+      String(col.key ?? col.dataIndex ?? index);
+    const allKeys = columns.map(keyOf);
+
+    // Stored order first, then anything it does not mention — a column added in
+    // a later release must appear rather than vanish because an old saved order
+    // predates it.
+    const ordered = order.length
+      ? [
+          ...order.map((k) => columns[allKeys.indexOf(k)]).filter(Boolean),
+          ...columns.filter((c, i) => !order.includes(keyOf(c, i))),
+        ]
+      : columns;
+
+    return ordered.map((col, index) => {
+      const key = keyOf(col, columns.indexOf(col) >= 0 ? columns.indexOf(col) : index);
       const width = widths[key] ?? col.width;
       // Centring here rather than on every column definition keeps it one
       // decision instead of a hundred, and an explicit align still wins.
       const centred = { ...col, align: col.align ?? ("center" as const) };
-      if (typeof width !== "number") return centred;
+      const heading = (
+        <DraggableTitle
+          columnKey={key}
+          onMove={(from, to) => moveColumn(from, to, ordered.map((c, i) => keyOf(c, i)))}
+        >
+          {typeof col.title === "function" ? null : col.title}
+        </DraggableTitle>
+      );
+      if (typeof width !== "number") return { ...centred, title: heading };
       return {
         ...centred,
         width,
         title: (
-          <ResizableTitle
-            width={width}
-            onResize={(next) => setWidth(key, next)}
-          >
-            {typeof col.title === "function" ? null : col.title}
+          <ResizableTitle width={width} onResize={(next) => setWidth(key, next)}>
+            {heading}
           </ResizableTitle>
         ),
       };
     });
   }
 
-  return { resizable, reset, hasCustomWidths: Object.keys(widths).length > 0 };
+  return {
+    resizable,
+    reset,
+    hasCustomWidths: Object.keys(widths).length > 0 || order.length > 0,
+  };
+}
+
+function DraggableTitle({
+  children, columnKey, onMove,
+}: {
+  children: React.ReactNode;
+  columnKey: string;
+  onMove: (from: string, to: string) => void;
+}) {
+  const [over, setOver] = useState(false);
+  return (
+    <span
+      draggable
+      onDragStart={(e) => {
+        e.dataTransfer.setData("text/column", columnKey);
+        e.dataTransfer.effectAllowed = "move";
+      }}
+      onDragOver={(e) => {
+        // Only react to a column drag; a file dropped on a header should do
+        // nothing rather than reorder something.
+        if (!e.dataTransfer.types.includes("text/column")) return;
+        e.preventDefault();
+        setOver(true);
+      }}
+      onDragLeave={() => setOver(false)}
+      onDrop={(e) => {
+        const from = e.dataTransfer.getData("text/column");
+        setOver(false);
+        if (from && from !== columnKey) onMove(from, columnKey);
+      }}
+      title="拖曳可調整欄位順序"
+      style={{
+        display: "block", cursor: "grab",
+        boxShadow: over ? "inset 2px 0 0 #1677ff" : undefined,
+      }}
+    >
+      {children}
+    </span>
+  );
 }
 
 function ResizableTitle({

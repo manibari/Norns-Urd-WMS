@@ -40,7 +40,9 @@ CREATE TABLE IF NOT EXISTS inventory_item (
     has_expiry       INTEGER NOT NULL DEFAULT 0,
     -- 要不要讓這個品項走影像辨識. 有型號/料號只代表「認得出來」, 這個欄位是
     -- 「要不要用」—— 標籤太小、常辨錯的品項可以關掉, 直接走人工.
+    -- 沒型號也沒料號的品項存 0: 開著卻認不出來是自相矛盾的狀態.
     use_recognition  INTEGER NOT NULL DEFAULT 1,
+    sort_order       INTEGER,         -- 主檔顯示順序, 使用者可拖曳調整
     -- 箱上標籤印的完整料號 (例 2003.T7320BC-340X900-P1). 人不填這個, 影像辨識讀到的
     -- 是它, 用來對映回品項 (requirement 4 正規化對映表).
     supplier_code    TEXT,
@@ -197,6 +199,7 @@ _ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("inventory_item", "has_expiry", "has_expiry INTEGER NOT NULL DEFAULT 0"),
     ("inventory_item", "use_recognition", "use_recognition INTEGER NOT NULL DEFAULT 1"),
     ("material_usage_scan", "qty", "qty INTEGER NOT NULL DEFAULT 1"),
+    ("inventory_item", "sort_order", "sort_order INTEGER"),
     ("inventory_lot", "qty_received", "qty_received INTEGER"),
 )
 

@@ -41,7 +41,7 @@ export default function StockPage() {
   const [editForm] = Form.useForm();
 
   const load = useCallback(async () => {
-    const [i, l, a] = await Promise.allSettled([api.items(), api.lots(), api.alerts()]);
+    const [i, l, a] = await Promise.allSettled([api.items("recent"), api.lots(), api.alerts()]);
     if (i.status === "fulfilled") setItems(i.value);
     else message.error(`品項載入失敗：${i.reason?.message}`);
     if (l.status === "fulfilled") setLots(l.value);
@@ -309,7 +309,9 @@ export default function StockPage() {
                 }
                 if (!item.recognisable) {
                   tags.push(
-                    <Tooltip key="man" title="沒有型號也沒登記箱上料號，領用時人工選">
+                    <Tooltip key="man" title={item.matchable
+                      ? "這個品項的影像辨識已關閉，領用時人工選"
+                      : "沒有型號也沒登記箱上料號，領用時人工選"}>
                       <Tag>人工選</Tag>
                     </Tooltip>,
                   );

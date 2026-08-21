@@ -254,7 +254,9 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }),
-  items: () => req<Item[]>("/api/items"),
+  /** order: "sort" = 主檔自訂順序（預設）；"recent" = 最近進貨在前 */
+  items: (order?: "sort" | "recent") =>
+    req<Item[]>(`/api/items${order ? `?order=${order}` : ""}`),
   lots: (itemId?: number) => req<Lot[]>(`/api/lots${itemId ? `?item_id=${itemId}` : ""}`),
   createLot: (body: Record<string, unknown>) =>
     req<{
@@ -297,6 +299,8 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ label }),
     }),
+  reorderItems: (item_ids: number[]) =>
+    req<{ ok: boolean; count: number }>("/api/items/reorder", json({ item_ids })),
   createItem: (body: Record<string, unknown>) => req<Record<string, unknown>>("/api/items", json(body)),
   deleteItem: (id: number) =>
     req<{ id: number; deleted: boolean }>(`/api/items/${id}`, { method: "DELETE" }),

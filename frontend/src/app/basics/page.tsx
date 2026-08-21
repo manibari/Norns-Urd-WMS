@@ -24,6 +24,7 @@ import {
 import { useCallback, useEffect, useState } from "react";
 import { useAuth } from "@/components/AuthGate";
 import CreatableSelect from "@/components/CreatableSelect";
+import { useRowDrag } from "@/components/DraggableRows";
 import { NumberCell, TextCell } from "@/components/EditableCell";
 import { useColumnWidths } from "@/components/resizable";
 import DictionaryTable from "@/components/DictionaryTable";
@@ -48,6 +49,17 @@ export default function BasicsPage() {
   const [draftForm] = Form.useForm();
   const { can, user: me } = useAuth();
   const itemCols = useColumnWidths("items");
+  const rowDrag = useRowDrag(items, async (orderedIds) => {
+    // Optimistic: the list jumps immediately, then the server confirms. A
+    // half-second lag on a drag makes it feel like the drop did not take.
+    setItems((prev) => orderedIds.map((id) => prev.find((i) => i.id === id)!).filter(Boolean));
+    try {
+      await api.reorderItems(orderedIds);
+    } catch (e) {
+      message.error(`順序沒存起來：${(e as Error).message}`);
+      load();
+    }
+  });
 
   const load = useCallback(async () => {
     const [i, d, o, r] = await Promise.allSettled([
@@ -147,7 +159,10 @@ export default function BasicsPage() {
           size="middle"
           scroll={{ x: 1360 }}
           locale={{ emptyText: <Empty description="尚無品項" image={Empty.PRESENTED_IMAGE_SIMPLE} /> }}
-          columns={itemCols.resizable([
+          onRow={(row: Item) => rowDrag.rowProps(row)}
+          columns={[
+            ...(can("item.manage") ? [rowDrag.handleColumn()] : []),
+            ...itemCols.resizable([
             {
               title: "原物料名稱", dataIndex: "name", width: 180,
               render: (v: string, row: Item) => (
@@ -166,24 +181,28 @@ export default function BasicsPage() {
               // be matched — whether to actually use recognition for this item
               // is a judgement (small label, keeps misreading) that belongs to
               // whoever maintains the master.
-              title: "影像辨識", width: 150, align: "center" as const,
-              render: (_, row: Item) => (
-                <Space size={4}>
-                  <Tooltip title={row.matchable
-                    ? "關掉的話，這個品項的領用一律人工選"
-                    : "沒有型號也沒登記箱上料號 —— 標籤上沒東西可對映，開了也認不出"}>
+              title: "影像辨識", width: 140, align: "center" as const,
+              // No switch when there is nothing to match against. A disabled
+              // toggle that still looks "on" next to the words 無可對映 says two
+              // contradictory things at once; the honest rendering is to not
+              // offer the choice and say what would enable it.
+              render: (_, row: Item) =>
+                row.matchable ? (
+                  <Space size={4}>
                     <Switch
                       size="small"
                       checked={Boolean(row.use_recognition)}
-                      disabled={!row.matchable}
                       onChange={(next) => patchField(row, "use_recognition", next)}
                     />
+                    {row.use_recognition
+                      ? <Tag color="blue">開啟</Tag>
+                      : <Tag>關閉</Tag>}
+                  </Space>
+                ) : (
+                  <Tooltip title="填了型號或箱上完整料號，才有東西可以跟標籤對映">
+                    <Text type="secondary" style={{ fontSize: 12 }}>需型號或料號</Text>
                   </Tooltip>
-                  {row.recognisable
-                    ? <Tag color="blue">辨識</Tag>
-                    : <Tag>{row.matchable ? "已關閉" : "無可對映"}</Tag>}
-                </Space>
-              ),
+                ),
             },
             {
               title: "規格", dataIndex: "spec", width: 140,
@@ -192,7 +211,7 @@ export default function BasicsPage() {
               ),
             },
             {
-              title: "廠商", dataIndex: "supplier", width: 130,
+              title: "廠商", dataIndex: "supplier", width: 150,
               render: (v: string | null, row: Item) => (
                 <CreatableSelect
                   value={v ?? undefined}
@@ -284,7 +303,7 @@ export default function BasicsPage() {
                   </Popconfirm>
                 ),
             },
-          ])}
+          ])]}
           footer={can("item.manage") ? () => (
             <Form form={draftForm} layout="inline" onFinish={addItem} style={{ rowGap: 8 }}>
               <Form.Item

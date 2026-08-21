@@ -75,6 +75,11 @@ export default function CreatableSelect({
       allowClear
       size={size}
       style={style}
+      // The dropdown must not inherit the column's width: these live in narrow
+      // table cells, and a 130px popup makes both the option labels and the
+      // "add new" box unreadable.
+      popupMatchSelectWidth={false}
+      styles={{ popup: { root: { minWidth: 280 } } }}
       filterOption={(input, option) =>
         String(option?.value ?? "").toLowerCase().includes(input.toLowerCase())
         || String(option?.label ?? "").toLowerCase().includes(input.toLowerCase())
@@ -88,19 +93,22 @@ export default function CreatableSelect({
         <>
           {menu}
           <Divider style={{ margin: "8px 0" }} />
-          <Space style={{ padding: "0 8px 4px" }}>
+          <Space.Compact style={{ padding: "0 8px 6px", width: "100%" }}>
             <Input
               ref={inputRef as never}
               placeholder={addLabel}
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
+              // Without this, typing a space or arrow key is eaten by the
+              // Select's own keyboard handling instead of reaching the input.
               onKeyDown={(e) => e.stopPropagation()}
               onPressEnter={add}
+              style={{ minWidth: 180 }}
             />
-            <Button type="text" icon={<PlusOutlined />} onClick={add}>
-              {addLabel}
+            <Button type="primary" icon={<PlusOutlined />} onClick={add}>
+              新增
             </Button>
-          </Space>
+          </Space.Compact>
         </>
       )}
     />
