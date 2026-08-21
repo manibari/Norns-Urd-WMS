@@ -22,13 +22,13 @@ import sys
 from dataclasses import asdict
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "core"))
 
-from urdwms_poc.evaluate import (  # noqa: E402
+from urdwms_core.evaluate import (  # noqa: E402
     Evaluation, Outcome, Sample, evaluate, false_hit_upper_bound, summarize,
 )
-from urdwms_poc.matching import Candidate  # noqa: E402
-from urdwms_poc.recognition import (  # noqa: E402
+from urdwms_core.matching import Candidate  # noqa: E402
+from urdwms_core.recognition import (  # noqa: E402
     ClaudeProvider, GeminiProvider, Recognition, ReplayProvider,
 )
 

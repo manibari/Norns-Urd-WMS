@@ -5,3 +5,8 @@ node_modules/
 .env
 .venv/
 poc/out/
+backend/urdwms.db
+backend/uploads/
+frontend/.next/
+frontend/node_modules/
+next-env.d.ts

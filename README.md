@@ -24,8 +24,42 @@ Norns 產品線 **Urd（記錄）** 層。前身是 Norns-ERP 的 M7 模組，20
 | `docs/requirements/assets/packaging-material-fifo/` | 現場實照 4 張（2026-08-20 拍攝） |
 | [`docs/poc/recognition-poc-spec.md`](docs/poc/recognition-poc-spec.md) | **辨識 PoC 規格** — v1 第一優先，排在 mockup 之前 |
 | `docs/_inherited/` | 前身 M7 的 requirement v0.2 + 系統架構（唯讀參考） |
+| `core/urdwms_core/` | **共用核心**：日期/料號正規化、OCR 混淆距離、候選集比對、辨識 provider |
+| `poc/` | PoC 工具與測試（見 [`poc/README.md`](poc/README.md)） |
+| `backend/` · `frontend/` | 垂直切片 demo |
+
+## 跑起來
+
+```bash
+echo 'GEMINI_API_KEY=...' > .env          # 辨識用；沒有的話流程仍可跑，會退人工挑批次
+
+# 後端 :8071
+python3 backend/seed.py
+set -a && . ./.env && set +a
+python3 -m uvicorn app.main:app --app-dir backend --port 8071
+
+# 前端 :3071
+cd frontend && pnpm install && pnpm dev
+```
+
+開 http://localhost:3071 。四個畫面：領用登錄 / 收貨建批 / 紀錄與追溯 / 提醒。
 
 ## 狀態
 
-需求階段 v1.1。**下一步是辨識 PoC** —— 驗收章確定改不掉（Q1=no），
-必須先量出「候選集命中率 / 誤命中率」才知道整套能不能成立。PoC 有結論再進 `/user-flow` → mockup → plan。
+**垂直切片 demo 可跑**（US-1/2/3/4/5 核心路徑 + US-6/8 提醒）。範圍見下表。
+
+| | 已做 | 未做 |
+|---|---|---|
+| 收貨 | 建批、料號可自由新增、期初補登 | 採購單、供應商 |
+| 領用 | 拍照辨識、候選集比對、FIFO 硬擋、人工挑批、同 transaction 扣帳 | 離線暫存、連拍擇優 |
+| 稽核 | 覆核放行（必填原因）、audit_log、影像永久留存 | RBAC（目前單一 demo 身分） |
+| 提醒 | 效期 / 呆滯 / 低水位 / 明細待補 | 稽核異常告警（US-9） |
+| 追溯 | 紀錄列表 + 影像 drill-down | 正反向查詢頁、報表匯出 |
+| 設定 | — | 廠別配置（US-11，目前欄位寫死） |
+
+辨識 PoC 初步結果（n=2 有章樣本，`gemini-pro-latest`）：命中 100%、誤命中 0%、
+兩張陷阱樣本正確回 null。**撐不起結論**，真 PoC 仍需現場實拍 100–200 張分層樣本。
+
+技術棧：FastAPI + SQLite（:8071）· Next.js 15 + antd v6（:3071）· 設計沿用
+[ChimesFlow design system](../ChimesFlow/docs/design-system.md)，領用畫面宣告 mode-b 局部 override
+（touch target 64px、大字、整片色塊回饋 —— 戴手套、包裝線、可能逆光）。

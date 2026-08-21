@@ -4,10 +4,10 @@ import sys
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "core"))
 
-from urdwms_poc.matching import Candidate, DeferReason, fifo_expected, match_candidates
-from urdwms_poc.normalize import to_date_key
+from urdwms_core.matching import Candidate, DeferReason, fifo_expected, match_candidates
+from urdwms_core.normalize import to_date_key
 
 STOCK = [
     Candidate("L1", "2026-08-12"),

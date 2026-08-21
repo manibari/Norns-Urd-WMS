@@ -4,9 +4,9 @@ import sys
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "core"))
 
-from urdwms_poc.normalize import confusion_distance, normalize_item_code, to_date_key
+from urdwms_core.normalize import confusion_distance, normalize_item_code, to_date_key
 
 
 class DateFormats(unittest.TestCase):
