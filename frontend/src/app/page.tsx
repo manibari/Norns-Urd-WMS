@@ -23,7 +23,8 @@
 import { ArrowRightOutlined, PlusOutlined } from "@ant-design/icons";
 import {
   Alert, Button, Card, Checkbox, Col, DatePicker, Divider, Empty, Form, Input,
-  InputNumber, Radio, Row, Segmented, Space, Table, Tag, Typography, message,
+  InputNumber, Modal, Popconfirm, Radio, Row, Segmented, Space, Table, Tag,
+  Tooltip, Typography, message,
 } from "antd";
 import dayjs from "dayjs";
 import Link from "next/link";
@@ -44,6 +45,8 @@ export default function ReceivingPage() {
   const [dict, setDict] = useState<Dictionary | null>(null);
   const [busy, setBusy] = useState(false);
   const [enteredCount, setEnteredCount] = useState(0);
+  const [editing, setEditing] = useState<Lot | null>(null);
+  const [editForm] = Form.useForm();
   const [knownCode, setKnownCode] = useState(false);
   // Metres is the default: the acceptance form records quantity in metres, so
   // boxes is the exception here, not the norm.
@@ -65,14 +68,15 @@ export default function ReceivingPage() {
       : null;
 
   const load = useCallback(async () => {
-    try {
-      const [i, l, d] = await Promise.all([api.items(), api.lots(), api.dictionary()]);
-      setItems(i);
-      setLots(l);
-      setDict(d);
-    } catch (e) {
-      message.error((e as Error).message);
-    }
+    // Settled, not all: a single failing endpoint must not blank the page into
+    // looking like an empty warehouse.
+    const [i, l, d] = await Promise.allSettled([api.items(), api.lots(), api.dictionary()]);
+    if (i.status === "fulfilled") setItems(i.value);
+    else message.error(`品項載入失敗：${i.reason?.message ?? i.reason}`);
+    if (l.status === "fulfilled") setLots(l.value);
+    else message.error(`批次載入失敗：${l.reason?.message ?? l.reason}`);
+    if (d.status === "fulfilled") setDict(d.value);
+    else message.error(`選項載入失敗：${d.reason?.message ?? d.reason}`);
   }, []);
 
   useEffect(() => { load(); }, [load]);
@@ -163,6 +167,44 @@ export default function ReceivingPage() {
       message.error((e as Error).message);
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function saveEdit() {
+    const values = await editForm.validateFields().catch(() => null);
+    if (!values || !editing) return;
+    setBusy(true);
+    try {
+      const res = await api.patchLot(editing.id, {
+        receipt_date: values.receipt_date ? dayjs(values.receipt_date).format("YYYY-MM-DD") : undefined,
+        manufacture_date: values.manufacture_date ? dayjs(values.manufacture_date).format("YYYY-MM-DD") : undefined,
+        expiry_date: values.expiry_date ? dayjs(values.expiry_date).format("YYYY-MM-DD") : undefined,
+        supplier: values.supplier || undefined,
+        supplier_lot_code: values.supplier_lot_code || undefined,
+        qty_on_hand: values.qty_on_hand,
+        verdict: values.verdict || undefined,
+        remark: values.remark || undefined,
+      });
+      message.success("已更新，變更前後值已寫入異動軌跡");
+      if (res.posted_draws > 0) {
+        message.warning(`這批已有 ${res.posted_draws} 筆領用紀錄，改動會影響既有帳。`, 8);
+      }
+      setEditing(null);
+      load();
+    } catch (e) {
+      message.error((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function removeLot(lot: Lot) {
+    try {
+      await api.deleteLot(lot.id);
+      message.success("已刪除");
+      load();
+    } catch (e) {
+      message.error((e as Error).message, 10);
     }
   }
 
@@ -477,15 +519,133 @@ export default function ReceivingPage() {
             },
             {
               title: "",
-              width: 90,
+              width: 60,
               render: (_, row: Lot) =>
-                row.qty_on_hand > 0 ? (
+                row.qty_on_hand > 0 && row.verdict !== "不合格" ? (
                   <Link href={`/issue?item=${encodeURIComponent(row.item_code)}`}>領用</Link>
                 ) : null,
+            },
+            {
+              title: "管理",
+              width: 130,
+              render: (_, row: Lot) => (
+                <Space size={4}>
+                  <Button
+                    size="small"
+                    type="link"
+                    onClick={() => {
+                      setEditing(row);
+                      editForm.setFieldsValue({
+                        receipt_date: dayjs(row.receipt_date),
+                        manufacture_date: row.manufacture_date ? dayjs(row.manufacture_date) : null,
+                        expiry_date: row.expiry_date ? dayjs(row.expiry_date) : null,
+                        supplier: row.supplier,
+                        supplier_lot_code: row.supplier_lot_code,
+                        qty_on_hand: row.qty_on_hand,
+                        verdict: row.verdict,
+                        remark: row.remark,
+                      });
+                    }}
+                  >
+                    編輯
+                  </Button>
+                  {row.draw_count > 0 ? (
+                    // Not disabled-and-silent: the reason is the interesting part.
+                    <Tooltip title={`已有 ${row.draw_count} 筆領用紀錄，刪掉追溯會斷。要退出流通請把數量改成 0。`}>
+                      <Button size="small" type="link" disabled>刪除</Button>
+                    </Tooltip>
+                  ) : (
+                    <Popconfirm
+                      title="刪除這批？"
+                      description="沒有任何領用紀錄，可以安全刪除。"
+                      okText="刪除"
+                      cancelText="取消"
+                      okButtonProps={{ danger: true }}
+                      onConfirm={() => removeLot(row)}
+                    >
+                      <Button size="small" type="link" danger>刪除</Button>
+                    </Popconfirm>
+                  )}
+                </Space>
+              ),
             },
           ]}
         />
       </Card>
+
+      <Modal
+        open={Boolean(editing)}
+        title={`編輯批次 #${editing?.id}　${editing?.item_code ?? ""}`}
+        onCancel={() => setEditing(null)}
+        onOk={saveEdit}
+        confirmLoading={busy}
+        okText="儲存"
+        cancelText="取消"
+        width={800}
+        destroyOnHidden
+      >
+        <Alert
+          type="info"
+          title="變更會寫入異動軌跡"
+          description={
+            editing?.draw_count
+              ? `這批已有 ${editing.draw_count} 筆領用紀錄。改進貨日會改變 FIFO 順序，改數量會影響既有帳 —— 變更前後值都會留紀錄。`
+              : "改動前後的值都會留下紀錄，不會靜默變更。"
+          }
+          style={{ marginBottom: 16 }}
+        />
+        <Form form={editForm} layout="vertical">
+          <Row gutter={16}>
+            <Col span={8}>
+              <Form.Item name="receipt_date" label="進貨日期" extra="FIFO 排序鍵">
+                <DatePicker style={{ width: "100%" }} disabledDate={(d) => d.isAfter(dayjs(), "day")} />
+              </Form.Item>
+            </Col>
+            <Col span={8}>
+              <Form.Item name="manufacture_date" label="標示（製造日期）">
+                <DatePicker style={{ width: "100%" }} />
+              </Form.Item>
+            </Col>
+            <Col span={8}>
+              <Form.Item name="expiry_date" label="標示（有效日期）">
+                <DatePicker style={{ width: "100%" }} />
+              </Form.Item>
+            </Col>
+          </Row>
+          <Row gutter={16}>
+            <Col span={8}>
+              <Form.Item name="supplier" label="廠商名稱">
+                <CreatableSelect options={suppliers} placeholder="選廠商" category="supplier" onAdded={load} />
+              </Form.Item>
+            </Col>
+            <Col span={8}>
+              <Form.Item name="supplier_lot_code" label="原廠批號 ROLL#">
+                <Input />
+              </Form.Item>
+            </Col>
+            <Col span={8}>
+              <Form.Item name="qty_on_hand" label="在庫數量（箱）">
+                <InputNumber min={0} style={{ width: "100%" }} />
+              </Form.Item>
+            </Col>
+          </Row>
+          <Row gutter={16}>
+            <Col span={8}>
+              <Form.Item name="verdict" label="判定">
+                <Radio.Group buttonStyle="solid">
+                  <Radio.Button value="合格">合格</Radio.Button>
+                  <Radio.Button value="不合格">不合格</Radio.Button>
+                </Radio.Group>
+              </Form.Item>
+            </Col>
+            <Col span={16}>
+              <Form.Item name="remark" label="備註">
+                <Input />
+              </Form.Item>
+            </Col>
+          </Row>
+        </Form>
+      </Modal>
     </>
   );
 }

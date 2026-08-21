@@ -142,6 +142,21 @@ class ItemPatch(BaseModel):
     supplier: str | None = None
 
 
+class LotPatch(BaseModel):
+    """Admin correction of a receiving line. Every field here is something a
+    person can mistype off the paper form."""
+
+    receipt_date: str | None = None
+    manufacture_date: str | None = None
+    expiry_date: str | None = None
+    supplier: str | None = None
+    supplier_lot_code: str | None = None
+    qty_on_hand: int | None = None
+    verdict: str | None = None
+    remark: str | None = None
+    actor: str = "admin"
+
+
 class ScanIn(BaseModel):
     item_code: str
     lot_id: int | None = None
@@ -322,6 +337,9 @@ def lots(item_code: str | None = None) -> list[dict]:
             params = (item_code,)
         sql += " ORDER BY l.item_code, l.receipt_date"
         rows = [dict(r) for r in conn.execute(sql, params).fetchall()]
+        drawn = {r["lot_id"]: r["n"] for r in conn.execute(
+            "SELECT lot_id, COUNT(*) AS n FROM material_usage_scan"
+            " WHERE lot_id IS NOT NULL GROUP BY lot_id").fetchall()}
 
         by_item: dict[str, list[Candidate]] = {}
         for row in rows:
@@ -333,7 +351,92 @@ def lots(item_code: str | None = None) -> list[dict]:
         expected = fifo_expected(by_item.get(row["item_code"], []))
         row["is_fifo_next"] = str(row["id"]) in expected
         row["inspection"] = json.loads(row.get("inspection") or "{}")
+        row["draw_count"] = drawn.get(row["id"], 0)
     return rows
+
+
+@app.patch("/api/lots/{lot_id}")
+def update_lot(lot_id: int, payload: LotPatch) -> dict:
+    """Correct a receiving line.
+
+    Required by US-1 ("事後發現數量登錯可修正，但寫入 audit_log，不可靜默改").
+    The audit entry carries before and after values, because "someone changed
+    the receipt date" is useless without knowing what it was — and the receipt
+    date is the FIFO sort key, so changing it reorders what everyone should be
+    drawing next.
+    """
+    changes: dict = {}
+    for field in ("supplier", "supplier_lot_code", "remark", "verdict"):
+        value = getattr(payload, field)
+        if value is not None:
+            changes[field] = value
+    for field in ("receipt_date", "manufacture_date", "expiry_date"):
+        raw = getattr(payload, field)
+        if raw is None:
+            continue
+        parsed = to_date_key(raw)
+        if parsed is None or parsed.iso is None:
+            raise HTTPException(400, f"{field} 日期格式無法辨識：{raw}")
+        changes[field] = parsed.iso
+    if payload.qty_on_hand is not None:
+        if payload.qty_on_hand < 0:
+            raise HTTPException(400, "在庫數量不可為負")
+        changes["qty_on_hand"] = payload.qty_on_hand
+    if payload.verdict is not None and payload.verdict not in ("合格", "不合格"):
+        raise HTTPException(400, "判定只能是合格或不合格")
+    if not changes:
+        raise HTTPException(400, "沒有要更新的欄位")
+    if changes.get("receipt_date", "") > date.today().isoformat():
+        raise HTTPException(400, "進貨日不可在未來")
+
+    with transaction() as conn:
+        before = conn.execute("SELECT * FROM inventory_lot WHERE id = ?", (lot_id,)).fetchone()
+        if before is None:
+            raise HTTPException(404, "批次不存在")
+        drawn = conn.execute(
+            "SELECT COUNT(*) AS n FROM material_usage_scan WHERE lot_id = ?"
+            " AND status IN ('posted','overridden')", (lot_id,)).fetchone()["n"]
+        conn.execute(f"UPDATE inventory_lot SET {', '.join(f'{k} = ?' for k in changes)}"
+                     " WHERE id = ?", (*changes.values(), lot_id))
+        log(conn, payload.actor, "lot.update", {
+            "lot_id": lot_id,
+            "before": {k: before[k] for k in changes},
+            "after": changes,
+            "posted_draws": drawn,
+        })
+    return {"id": lot_id, "changed": changes, "posted_draws": drawn}
+
+
+@app.delete("/api/lots/{lot_id}")
+def delete_lot(lot_id: int, actor: str = "admin") -> dict:
+    """Delete a receiving line — only while nothing has been drawn from it.
+
+    A lot that has been issued from is referenced by usage records. Deleting it
+    would leave those records pointing at a lot that no longer exists, and the
+    traceability answer ("which film went into this product") is the entire
+    reason the system exists. So a used lot is refused, with the count, and the
+    caller is pointed at setting the quantity to zero instead — which keeps the
+    chain intact and still takes it out of circulation.
+    """
+    with transaction() as conn:
+        row = conn.execute("SELECT * FROM inventory_lot WHERE id = ?", (lot_id,)).fetchone()
+        if row is None:
+            raise HTTPException(404, "批次不存在")
+        drawn = conn.execute(
+            "SELECT COUNT(*) AS n FROM material_usage_scan WHERE lot_id = ?", (lot_id,)).fetchone()["n"]
+        if drawn:
+            raise HTTPException(
+                409,
+                f"這批已有 {drawn} 筆領用紀錄，刪掉會讓那些紀錄指向不存在的批次，追溯就斷了。"
+                " 要讓它退出流通請把在庫數量改成 0。",
+            )
+        conn.execute("DELETE FROM inventory_lot WHERE id = ?", (lot_id,))
+        log(conn, actor, "lot.delete", {
+            "lot_id": lot_id,
+            "deleted": {k: row[k] for k in ("item_code", "receipt_date", "manufacture_date",
+                                            "qty_on_hand", "supplier", "verdict")},
+        })
+    return {"id": lot_id, "deleted": True}
 
 
 @app.post("/api/lots")
@@ -691,6 +794,25 @@ def override(scan_id: int, payload: OverrideIn) -> dict:
                      " WHERE id = ? AND qty_on_hand > 0", (row["lot_id"],))
         log(conn, payload.actor, "scan.overridden", {"scan_id": scan_id, "reason": payload.reason})
     return {"id": scan_id, "status": "overridden"}
+
+
+@app.get("/api/audit")
+def audit(limit: int = 200, action: str | None = None) -> list[dict]:
+    """The change trail.
+
+    US-1 requires corrections to be recorded rather than silent. A trail nobody
+    can read is silent in every way that matters, so it gets a screen.
+    """
+    sql = "SELECT * FROM audit_log"
+    params: list = []
+    if action:
+        sql += " WHERE action LIKE ?"
+        params.append(f"{action}%")
+    sql += " ORDER BY id DESC LIMIT ?"
+    params.append(limit)
+    with transaction() as conn:
+        rows = conn.execute(sql, params).fetchall()
+    return [{**dict(r), "detail": json.loads(r["detail"] or "{}")} for r in rows]
 
 
 # --------------------------------------------------------------------------- traceability & alerts

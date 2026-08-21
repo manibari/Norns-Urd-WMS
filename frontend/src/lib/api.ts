@@ -11,6 +11,8 @@ export type Lot = {
   entered_unit: string | null;
   expiry_date: string | null;
   inspection: Record<string, boolean | null>;
+  /** 這批被領用過幾次。>0 就不能刪，刪掉會讓領用紀錄指向不存在的批次 */
+  draw_count: number;
   /** 合格 | 不合格。不合格不計入在庫、FIFO 不指、領不出來 */
   verdict: string | null;
   recorded_by: string | null;
@@ -111,6 +113,14 @@ export type Alerts = {
   rejected: (Lot & { name: string })[];
 };
 
+export type AuditEntry = {
+  id: number;
+  at: string;
+  actor: string;
+  action: string;
+  detail: Record<string, unknown>;
+};
+
 export type DictEntry = {
   id: number;
   category: string;
@@ -175,6 +185,16 @@ export const api = {
   override: (id: number, reason: string) =>
     req<{ id: number; status: string }>(`/api/scans/${id}/override`, json({ reason })),
   alerts: () => req<Alerts>("/api/alerts"),
+  patchLot: (id: number, body: Record<string, unknown>) =>
+    req<{ id: number; changed: Record<string, unknown>; posted_draws: number }>(`/api/lots/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  deleteLot: (id: number) =>
+    req<{ id: number; deleted: boolean }>(`/api/lots/${id}`, { method: "DELETE" }),
+  audit: (action?: string) =>
+    req<AuditEntry[]>(`/api/audit${action ? `?action=${action}` : ""}`),
   dictionary: (includeInactive = false) =>
     req<Dictionary>(`/api/dictionary${includeInactive ? "?include_inactive=true" : ""}`),
   addDictEntry: (category: string, value: string) =>
