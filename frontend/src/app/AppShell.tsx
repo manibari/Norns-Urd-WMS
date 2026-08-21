@@ -14,10 +14,14 @@ import { usePathname } from "next/navigation";
 
 const { Sider, Content } = Layout;
 
+// Order is the pipeline, not a menu preference: a lot has to be received before
+// it can be issued, and a draw has to happen before there is anything to trace.
+// Landing on 收貨建批 also means a fresh install opens on the only screen that
+// can do anything — the issuing screen has an empty candidate set until stock exists.
 const NAV = [
-  { key: "/", icon: <CameraOutlined />, label: <Link href="/">領用登錄</Link> },
-  { key: "/receiving", icon: <InboxOutlined />, label: <Link href="/receiving">收貨建批</Link> },
-  { key: "/records", icon: <ProfileOutlined />, label: <Link href="/records">紀錄與追溯</Link> },
+  { key: "/", icon: <InboxOutlined />, label: <Link href="/">1. 收貨建批</Link> },
+  { key: "/issue", icon: <CameraOutlined />, label: <Link href="/issue">2. 領用登錄</Link> },
+  { key: "/records", icon: <ProfileOutlined />, label: <Link href="/records">3. 紀錄與追溯</Link> },
   { key: "/alerts", icon: <AlertOutlined />, label: <Link href="/alerts">提醒</Link> },
 ];
 
