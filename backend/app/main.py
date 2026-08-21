@@ -10,10 +10,12 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -21,6 +23,7 @@ from pydantic import BaseModel
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "core"))
 
+from urdwms_core.camera import CameraConfig, CameraError, capture as camera_capture  # noqa: E402
 from urdwms_core.matching import (  # noqa: E402
     Candidate, fifo_expected, fifo_target, match_candidates, match_item_code,
 )
@@ -75,11 +78,50 @@ def _fifo_verdict(candidates: list[Candidate], lot_id: str) -> tuple[bool, str |
     return lot_id in expected, expected_date
 
 
+# Built once and reused. Constructing a client per request meant a fresh TLS
+# handshake and auth exchange on every photo — most of the wait was that, not
+# the model: the same recognition takes ~7s against a warm client and ~23s
+# against a cold one.
+_PROVIDER: GeminiProvider | None = None
+
+
+def _assert_supplier_code_free(conn, supplier_code: str | None, exclude_id: int | None) -> None:
+    """A box code must identify exactly one item.
+
+    Two items sharing one printed code makes every photo of that box ambiguous
+    for ever — the matcher correctly refuses to guess, so recognition simply
+    never works for either item. Better to refuse the duplicate at entry than to
+    let it quietly disable the feature.
+    """
+    code = (supplier_code or "").strip()
+    if not code:
+        return
+    sql = "SELECT id, name, model FROM inventory_item WHERE supplier_code = ?"
+    params: list = [code]
+    if exclude_id is not None:
+        sql += " AND id <> ?"
+        params.append(exclude_id)
+    clash = conn.execute(sql, params).fetchone()
+    if clash:
+        label = clash["model"] or clash["name"]
+        raise HTTPException(
+            409,
+            f"箱上料號 {code} 已經是「{label}」的。同一個料號指到兩個品項的話，"
+            " 拍照永遠分不出是哪一個 —— 請確認哪一個才對。",
+        )
+
+
 def _provider() -> GeminiProvider:
-    return GeminiProvider(
-        model=os.environ.get("URDWMS_MODEL", "gemini-pro-latest"),
-        media_resolution="high",
-    )
+    global _PROVIDER
+    if _PROVIDER is None:
+        # Flash, measured rather than assumed: over repeated runs on the same
+        # box photo it reads the 型號 and both dates exactly as the pro model
+        # does, at a median 8.4s against 19.1s. On a packing line that gap is
+        # the difference between waiting and not bothering.
+        chosen = _setting(RECOGNITION_KEY,
+                          {"model": os.environ.get("URDWMS_MODEL", "gemini-3.7-flash")})["model"]
+        _PROVIDER = GeminiProvider(model=chosen, media_resolution="high")
+    return _PROVIDER
 
 
 # --------------------------------------------------------------------------- schemas
@@ -416,6 +458,186 @@ def update_user(user_id: int, payload: UserPatch,
     return {"id": user_id, "changed": list(changes)}
 
 
+# --------------------------------------------------------------------------- camera
+
+CAMERA_KEY = "camera"
+RECOGNITION_KEY = "recognition"
+ALERT_KEY = "alerts"
+
+# Measured on the field photos (docs/poc/recognition-poc-spec.md). Offered as a
+# choice rather than hard-coded because the trade-off is a factory's to make:
+# on a slow line the pro model's extra seconds may be fine.
+RECOGNITION_MODELS = [
+    {"value": "gemini-3.7-flash", "label": "Flash（預設）", "note": "中位 8.4 秒，實測讀值與 Pro 相同"},
+    {"value": "gemini-pro-latest", "label": "Pro", "note": "中位 19.1 秒，同樣讀對"},
+    {"value": "gemini-3.5-flash", "label": "Flash 3.5", "note": "較舊，實測把進貨日讀錯過"},
+]
+
+DEFAULT_ALERTS = {"expiry_days": 60, "stale_days": 120, "pending_hours": 24}
+
+
+def _setting(key: str, fallback: dict) -> dict:
+    with transaction() as conn:
+        row = conn.execute("SELECT value FROM app_setting WHERE key = ?", (key,)).fetchone()
+    return {**fallback, **(json.loads(row["value"]) if row else {})}
+
+
+def _save_setting(key: str, value: dict, actor: str) -> None:
+    with transaction() as conn:
+        conn.execute(
+            "INSERT INTO app_setting (key, value, updated_at, updated_by) VALUES (?,?,?,?)"
+            " ON CONFLICT(key) DO UPDATE SET value = excluded.value,"
+            " updated_at = excluded.updated_at, updated_by = excluded.updated_by",
+            (key, json.dumps(value, ensure_ascii=False), now(), actor),
+        )
+        log(conn, actor, f"setting.{key}", value)
+
+
+class RecognitionIn(BaseModel):
+    model: str
+
+
+class AlertThresholdsIn(BaseModel):
+    expiry_days: int
+    stale_days: int
+    pending_hours: int
+
+
+@app.get("/api/settings/recognition")
+def get_recognition(user: dict = Depends(current_user)) -> dict:
+    return {
+        **_setting(RECOGNITION_KEY, {"model": os.environ.get("URDWMS_MODEL", "gemini-3.7-flash")}),
+        "models": RECOGNITION_MODELS,
+    }
+
+
+@app.put("/api/settings/recognition")
+def set_recognition(payload: RecognitionIn,
+                    user: dict = Depends(requires("dictionary.manage"))) -> dict:
+    if payload.model not in {m["value"] for m in RECOGNITION_MODELS}:
+        raise HTTPException(400, f"未知的模型 {payload.model}")
+    _save_setting(RECOGNITION_KEY, {"model": payload.model}, user["name"])
+    global _PROVIDER
+    _PROVIDER = None   # rebuilt on next use so the change takes effect now
+    return {"ok": True, "model": payload.model}
+
+
+@app.get("/api/settings/alerts")
+def get_alert_thresholds(user: dict = Depends(current_user)) -> dict:
+    return _setting(ALERT_KEY, DEFAULT_ALERTS)
+
+
+@app.put("/api/settings/alerts")
+def set_alert_thresholds(payload: AlertThresholdsIn,
+                         user: dict = Depends(requires("dictionary.manage"))) -> dict:
+    values = payload.model_dump()
+    for key, value in values.items():
+        if value < 1:
+            raise HTTPException(400, f"{key} 必須大於 0")
+    _save_setting(ALERT_KEY, values, user["name"])
+    return {"ok": True, **values}
+
+
+class CameraIn(BaseModel):
+    enabled: bool = False
+    transport: str = "http"
+    host: str = ""
+    port: int = 80
+    path: str = "/snapshot.jpg"
+    username: str = ""
+    password: str = ""
+    trigger: str = ""
+    timeout: float = 8.0
+
+
+def _camera_config() -> CameraConfig:
+    with transaction() as conn:
+        row = conn.execute("SELECT value FROM app_setting WHERE key = ?", (CAMERA_KEY,)).fetchone()
+    if not row:
+        return CameraConfig()
+    return CameraConfig(**json.loads(row["value"]))
+
+
+@app.get("/api/camera")
+def get_camera(user: dict = Depends(current_user)) -> dict:
+    config = _camera_config()
+    return {
+        # The password is never returned — only whether one is set. A settings
+        # screen that round-trips a secret leaks it to every browser that opens
+        # the page.
+        **{k: v for k, v in config.__dict__.items() if k != "password"},
+        "has_password": bool(config.password),
+        "endpoint": config.endpoint if config.host else None,
+    }
+
+
+@app.put("/api/camera")
+def set_camera(payload: CameraIn, user: dict = Depends(requires("dictionary.manage"))) -> dict:
+    if payload.transport not in ("http", "raw"):
+        raise HTTPException(400, "連線方式只能是 http 或 raw")
+    if payload.enabled and not payload.host.strip():
+        raise HTTPException(400, "啟用網路相機必須填位址")
+    if not 1 <= payload.port <= 65535:
+        raise HTTPException(400, "連接埠必須在 1–65535")
+
+    existing = _camera_config()
+    data = payload.model_dump()
+    # Blank password means "leave it alone", so a settings save does not wipe a
+    # credential the form never received.
+    if not data["password"]:
+        data["password"] = existing.password
+
+    with transaction() as conn:
+        conn.execute(
+            "INSERT INTO app_setting (key, value, updated_at, updated_by) VALUES (?,?,?,?)"
+            " ON CONFLICT(key) DO UPDATE SET value = excluded.value,"
+            " updated_at = excluded.updated_at, updated_by = excluded.updated_by",
+            (CAMERA_KEY, json.dumps(data, ensure_ascii=False), now(), user["name"]),
+        )
+        log(conn, user["name"], "camera.configure",
+            {k: v for k, v in data.items() if k != "password"})
+    return {"ok": True, "endpoint": CameraConfig(**data).endpoint}
+
+
+@app.post("/api/camera/test")
+async def test_camera(user: dict = Depends(requires("dictionary.manage"))) -> dict:
+    """Fetch one frame and report what happened, without keeping it."""
+    config = _camera_config()
+    started = time.monotonic()
+    try:
+        data = await run_in_threadpool(camera_capture, config)
+    except CameraError as exc:
+        return {"ok": False, "endpoint": config.endpoint, "error": str(exc)}
+    return {
+        "ok": True,
+        "endpoint": config.endpoint,
+        "bytes": len(data),
+        "elapsed_ms": round((time.monotonic() - started) * 1000),
+    }
+
+
+@app.post("/api/camera/capture")
+async def capture_from_camera(user: dict = Depends(requires("issue.create"))) -> dict:
+    """Grab a frame and run it through recognition, exactly as an upload would.
+
+    Same downstream path as a phone photo — the issuing flow takes bytes and
+    does not care where they came from, which is the whole point of keeping the
+    capture source behind an interface.
+    """
+    config = _camera_config()
+    if not config.enabled:
+        raise HTTPException(400, "網路相機未啟用，請在基本資料設定")
+    try:
+        data = await run_in_threadpool(camera_capture, config)
+    except CameraError as exc:
+        raise HTTPException(502, str(exc)) from exc
+
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+    path = UPLOADS / f"{stamp}-cam.jpg"
+    path.write_bytes(data)
+    return await _recognise_path(path, data, None)
+
+
 # --------------------------------------------------------------------------- dictionary
 
 # Dropdowns that are NOT attributes of something else.
@@ -648,6 +870,8 @@ def update_item(item_id: int, payload: ItemPatch,
                 "SELECT 1 FROM inventory_item WHERE model = ? AND id <> ?",
                 (changes["model"], item_id)).fetchone():
             raise HTTPException(409, f"型號 {changes['model']} 已被其他品項使用")
+        if "supplier_code" in changes:
+            _assert_supplier_code_free(conn, changes["supplier_code"], item_id)
         conn.execute(f"UPDATE inventory_item SET {', '.join(f'{k} = ?' for k in changes)}"
                      " WHERE id = ?", (*changes.values(), item_id))
         log(conn, user["name"], "item.update", {"id": item_id, **changes})
@@ -663,6 +887,7 @@ def create_item(payload: ItemIn, user: dict = Depends(requires("item.manage"))) 
     with transaction() as conn:
         if model and conn.execute("SELECT 1 FROM inventory_item WHERE model = ?", (model,)).fetchone():
             raise HTTPException(409, f"型號 {model} 已存在")
+        _assert_supplier_code_free(conn, payload.supplier_code, None)
         cursor = conn.execute(
             "INSERT INTO inventory_item (name, model, spec, unit, shelf_life_days, safety_stock,"
             " meters_per_box, pack_unit, has_expiry, supplier_code, supplier)"
@@ -988,12 +1213,7 @@ def create_lot(payload: LotIn, user: dict = Depends(requires("lot.create"))) -> 
 @app.post("/api/recognize")
 async def recognize(image: UploadFile = File(...), item_id: int | None = Form(default=None),
                     user: dict = Depends(requires("issue.create"))) -> dict:
-    """Recognise a box: which 型號 it is, and which lot.
-
-    Both identifications come from the photo. The operator picks a 型號 only
-    when recognition cannot (`item_match.decision == "defer"`), which is the
-    same fallback shape as the lot matcher — one rule, one failure mode, one
-    thing to explain on the floor.
+    """Recognise an uploaded box photo: which item it is, and which lot.
 
     Only items with a 型號 or a registered supplier code can be identified this
     way — there is nothing on the label to map back from otherwise (the form's
@@ -1010,12 +1230,26 @@ async def recognize(image: UploadFile = File(...), item_id: int | None = Form(de
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
     suffix = Path(image.filename or "capture.jpg").suffix or ".jpg"
     path = UPLOADS / f"{stamp}{suffix}"
-    path.write_bytes(await image.read())
+    data = await image.read()
+    path.write_bytes(data)
+    return await _recognise_path(path, data, item_id)
 
+
+async def _recognise_path(path: Path, data: bytes, item_id: int | None) -> dict:
+    """Recognise a saved image and match it against stock.
+
+    Shared by the upload path and the network camera: whatever produced the
+    bytes, everything downstream is identical — which is what makes a fixed
+    camera an addition rather than a second implementation of issuing.
+    """
+    t_start = time.monotonic()
     try:
-        reading: Recognition = _provider().recognize(path)
+        # Off the event loop: the SDK call is blocking, and holding the loop for
+        # several seconds would stall every other request on a shared tablet.
+        reading: Recognition = await run_in_threadpool(_provider().recognize, path)
     except RuntimeError as exc:
         reading = Recognition(error=str(exc))
+    t_model = time.monotonic()
 
     with transaction() as conn:
         # Items with recognition switched off are excluded from matching
@@ -1039,6 +1273,12 @@ async def recognize(image: UploadFile = File(...), item_id: int | None = Form(de
 
     payload: dict = {
         "image_path": f"/uploads/{path.name}",
+        # Surfaced so "recognition is slow" can be pinned to a stage rather than
+        # guessed at.
+        "timing_ms": {
+            "model": round((t_model - t_start) * 1000),
+            "image_kb": round(len(data) / 1024),
+        },
         "recognition": {
             "receipt_date": reading.receipt_date,
             "manufacture_date": reading.manufacture_date,
@@ -1311,7 +1551,10 @@ def alerts(user: dict = Depends(current_user)) -> dict:
     constraint 2).
     """
     today = date.today()
-    stale_days, expiry_days, pending_hours = 120, 60, 24
+    thresholds = _setting(ALERT_KEY, DEFAULT_ALERTS)
+    expiry_days = thresholds["expiry_days"]
+    stale_days = thresholds["stale_days"]
+    pending_hours = thresholds["pending_hours"]
     out: dict[str, list] = {"expiring": [], "stale": [], "low_stock": [], "pending_detail": [],
                             "rejected": []}
 

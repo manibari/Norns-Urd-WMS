@@ -81,6 +81,20 @@ export type Item = {
   open_lots: number;
 };
 
+export type CameraSettings = {
+  enabled: boolean;
+  /** http = 抓 snapshot 網址；raw = 直接開 TCP socket */
+  transport: "http" | "raw";
+  host: string;
+  port: number;
+  path: string;
+  username: string;
+  trigger: string;
+  timeout: number;
+  has_password: boolean;
+  endpoint: string | null;
+};
+
 export type CatalogueEntry = {
   id: number;
   name: string;
@@ -282,6 +296,33 @@ export const api = {
     form.append("image", file);
     return req<Proposal>("/api/recognize", { method: "POST", body: form });
   },
+  camera: () => req<CameraSettings>("/api/camera"),
+  recognitionSettings: () =>
+    req<{ model: string; models: { value: string; label: string; note: string }[] }>(
+      "/api/settings/recognition"),
+  saveRecognition: (model: string) =>
+    req<{ ok: boolean; model: string }>("/api/settings/recognition", {
+      method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model }),
+    }),
+  alertThresholds: () =>
+    req<{ expiry_days: number; stale_days: number; pending_hours: number }>("/api/settings/alerts"),
+  saveAlertThresholds: (body: Record<string, number>) =>
+    req<Record<string, unknown>>("/api/settings/alerts", {
+      method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  saveCamera: (body: Record<string, unknown>) =>
+    req<{ ok: boolean; endpoint: string }>("/api/camera", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  testCamera: () =>
+    req<{ ok: boolean; endpoint: string; error?: string; bytes?: number; elapsed_ms?: number }>(
+      "/api/camera/test", { method: "POST" }),
+  /** 從網路相機擷取一張並辨識，跟上傳走同一條路 */
+  captureFromCamera: () => req<Proposal>("/api/camera/capture", { method: "POST" }),
   /** 辨識不出品項時，人工指定後重新比對批次（不重跑辨識、不重複計費） */
   resolveItem: (itemId: number, ocrReceiptDate: string | null) =>
     req<Partial<Proposal>>("/api/resolve-item", json({ item_id: itemId, ocr_receipt_date: ocrReceiptDate })),

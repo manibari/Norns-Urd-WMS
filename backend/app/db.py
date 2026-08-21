@@ -100,6 +100,14 @@ CREATE TABLE IF NOT EXISTS material_usage_scan (
     created_at           TEXT NOT NULL
 );
 
+-- 系統設定 (key-value). 目前只有影像來源, 但這類「整廠一份」的設定不該各自開表.
+CREATE TABLE IF NOT EXISTS app_setting (
+    key        TEXT PRIMARY KEY,
+    value      TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    updated_by TEXT
+);
+
 -- 角色顯示名稱. 角色「能做什麼」是系統設計(auth.PERMISSIONS, 寫在程式裡),
 -- 角色「叫什麼」是各廠用語, 所以只有 label 進 DB.
 CREATE TABLE IF NOT EXISTS app_role (

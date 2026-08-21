@@ -6,6 +6,7 @@ import {
   InboxOutlined,
   DatabaseOutlined,
   FileTextOutlined,
+  SettingOutlined,
   ProfileOutlined,
   TableOutlined,
 } from "@ant-design/icons";
@@ -42,6 +43,8 @@ const NAV = [
     label: <Link href="/alerts">提醒</Link> },
   { key: "/logs", icon: <FileTextOutlined />, needs: "audit.read",
     label: <Link href="/logs">系統日誌</Link> },
+  { key: "/settings", icon: <SettingOutlined />, needs: "dictionary.manage",
+    label: <Link href="/settings">系統設定</Link> },
 ];
 
 export default function AppShell({ children }: { children: React.ReactNode }) {

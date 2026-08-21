@@ -53,6 +53,30 @@ Norns 產品線 **Urd（記錄）** 層。前身是 Norns-ERP 的 M7 模組，20
 不做「製造日＋保存天數」推算 —— 推算出來的是一個沒人寫下、也沒人能拿去跟箱子核對的日期，
 而驗收單本來就有「有效日期」欄，答案應該從那裡來。
 
+## 影像來源可以是網路相機
+
+領用的「影像辨識」不在乎照片從哪來 —— 手機拍、上傳檔案、或**系統設定裡接一台 TCP/IP 相機**，
+之後的辨識、批次比對、FIFO 判定完全同一條路。這就是 M7 架構把擷取層抽開的用處：
+加一台固定相機是「多一個來源」，不是「再寫一套領用流程」。
+
+兩種傳輸都是純 TCP，且只用標準庫（產線上不該為了拍張照去連套件庫）：
+
+- **HTTP snapshot** — 抓 `http://ip:port/path`，幾乎所有 IP 相機都有，支援 basic auth
+- **原始 TCP** — 開 socket、可選送出觸發字串、讀到 JPEG 結束標記為止
+
+測試連線會說清楚失敗在哪 —— 連不到、逾時、或「回傳的不是 JPEG，開頭是 `<html>401…`」。
+最後那個是最常見的：路徑打錯拿到登入頁，而「失敗」兩個字會讓人跑去查網路。
+
+## 辨識速度是量出來的，不是猜的
+
+| 模型 | 中位耗時 | 型號＋兩個日期 |
+|---|---:|---|
+| `gemini-3.7-flash`（預設） | **8.4s** | 3/3 全對 |
+| `gemini-pro-latest` | 19.1s | 3/3 全對 |
+| `gemini-3.5-flash` | 11.8s | ✗ 進貨日讀錯 |
+
+⚠️ **單次計時會騙人**：pro 第一次跑出 6.9 秒，看起來比 flash 還快，中位其實是 19.1 秒。
+
 ## FIFO：指引只指一批，判定仍然寬鬆
 
 同進貨日的多批**都合法**（requirement US-3），但畫面上只有一批掛「FIFO 應領」——
@@ -141,7 +165,7 @@ echo 'GEMINI_API_KEY=...' > .env          # 辨識用；沒有的話流程仍可
 # 後端 :8071
 python3 backend/seed.py
 set -a && . ./.env && set +a
-python3 -m uvicorn app.main:app --app-dir backend --port 8071
+python3 -m uvicorn app.main:app --app-dir backend --port 8071 --reload
 
 # 前端 :3071
 cd frontend && pnpm install && pnpm dev
