@@ -18,7 +18,7 @@
 
 import { ArrowRightOutlined, PlusOutlined } from "@ant-design/icons";
 import {
-  Alert, Button, Card, Checkbox, Col, DatePicker, Divider, Form, Input,
+  Alert, Button, Card, Col, DatePicker, Divider, Form, Input,
   InputNumber, Radio, Row, Segmented, Select, Space, Steps, Typography, message,
 } from "antd";
 import dayjs from "dayjs";
@@ -29,6 +29,100 @@ import CreatableSelect from "@/components/CreatableSelect";
 import { api, type Dictionary, type Item } from "@/lib/api";
 
 const { Title, Text } = Typography;
+
+/** A block heading inside the wizard step. */
+function SectionHeading({ children }: { children: React.ReactNode }) {
+  return (
+    <div
+      style={{
+        fontSize: 15, fontWeight: 600, marginTop: 8, marginBottom: 4,
+        paddingBottom: 8, borderBottom: "2px solid #1677ff", display: "inline-block",
+      }}
+    >
+      {children}
+    </div>
+  );
+}
+
+/**
+ * 正常 / 不正常, with a note required when it is not.
+ *
+ * "不正常" without a reason is an inspection that recorded a problem and then
+ * lost what it was — the note is the only part a recall can act on, so it is
+ * required rather than optional.
+ */
+function CheckResult({ field }: { field: string }) {
+  return (
+    <Space orientation="vertical" size={8} style={{ width: "100%" }}>
+      <Form.Item name={`${field}_result`} noStyle>
+        <Radio.Group buttonStyle="solid">
+          <Radio.Button value="正常">正常</Radio.Button>
+          <Radio.Button value="不正常">不正常</Radio.Button>
+        </Radio.Group>
+      </Form.Item>
+      <Form.Item
+        noStyle
+        shouldUpdate={(a, b) => a[`${field}_result`] !== b[`${field}_result`]}
+      >
+        {({ getFieldValue }) => getFieldValue(`${field}_result`) === "不正常" ? (
+          <Form.Item
+            name={`${field}_note`} noStyle
+            rules={[{ required: true, message: "不正常請說明" }]}
+          >
+            <Input placeholder="哪裡不正常？" style={{ width: 360 }} />
+          </Form.Item>
+        ) : null}
+      </Form.Item>
+    </Space>
+  );
+}
+
+/** One numbered line of the inspection checklist: number, label, control, hint. */
+function InspectionRow({
+  n, label, hint, required, children,
+}: {
+  n?: number;
+  label: string;
+  hint?: string;
+  required?: boolean;
+  children: React.ReactNode;
+}) {
+  return (
+    <div
+      style={{
+        display: "flex", alignItems: "flex-start", gap: 12,
+        padding: "10px 0", borderBottom: "1px solid #f0f0f0",
+      }}
+    >
+      {/* Fixed 32px line boxes so the number and label line up with the first
+          row of the control, even when the control stacks a note underneath. */}
+      <span
+        style={{
+          width: 22, flexShrink: 0, height: 32, display: "flex",
+          alignItems: "center", justifyContent: "flex-end", color: "#8c8c8c",
+        }}
+      >
+        {n ?? ""}
+      </span>
+      <span
+        style={{
+          width: 96, flexShrink: 0, height: 32, display: "flex", alignItems: "center",
+        }}
+      >
+        {required && <span style={{ color: "#ff4d4f", marginInlineEnd: 4 }}>*</span>}
+        {label}
+      </span>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        {children}
+        {hint && (
+          <div style={{ marginTop: 6 }}>
+            <Text type="secondary" style={{ fontSize: 12 }}>{hint}</Text>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
 
 export default function ReceivingPage() {
   const [items, setItems] = useState<Item[]>([]);
@@ -112,11 +206,14 @@ export default function ReceivingPage() {
         expiry_date: values.expiry_date ? dayjs(values.expiry_date).format("YYYY-MM-DD") : null,
         entered_unit: qtyMode,
         inspection: {
-          規格尺寸: Boolean(values.spec_ok),
-          標示製造日期: Boolean(values.manufacture_date),
-          標示有效日期: Boolean(values.expiry_date),
-          外觀: Boolean(values.appearance_ok),
-          顏色: Boolean(values.colour_ok),
+          規格尺寸: values.spec_result ?? null,
+          規格尺寸備註: values.spec_note || null,
+          標示製造日期: values.manufacture_date ? "已填" : null,
+          標示有效日期: values.expiry_date ? "已填" : null,
+          外觀: values.appearance_result ?? null,
+          外觀備註: values.appearance_note || null,
+          顏色: values.colour_result ?? null,
+          顏色備註: values.colour_note || null,
         },
         verdict: values.verdict ?? null,
         confirmed_by: values.confirmed_by || null,
@@ -141,7 +238,8 @@ export default function ReceivingPage() {
       form.resetFields([
         "item_id", "item_name", "model", "spec", "qty", "qty_meters",
         "manufacture_date", "expiry_date", "supplier_code", "meters_per_box", "pack_unit",
-        "spec_ok", "appearance_ok", "colour_ok", "verdict", "remark",
+        "spec_result", "spec_note", "appearance_result", "appearance_note",
+        "colour_result", "colour_note", "verdict", "remark",
       ]);
       setStep(0);
       load();
@@ -162,7 +260,10 @@ export default function ReceivingPage() {
             <Text type="secondary">本次已登錄 {enteredCount} 批</Text>
             <Button size="small" onClick={() => {
               form.resetFields();
-              form.setFieldsValue({ receipt_date: dayjs(), verdict: "合格" });
+              form.setFieldsValue({
+                receipt_date: dayjs(), verdict: "合格",
+                spec_result: "相符", appearance_result: "正常", colour_result: "正常",
+              });
               setEnteredCount(0);
               setStep(0);
             }}>清空重填</Button>
@@ -179,7 +280,10 @@ export default function ReceivingPage() {
         <Form
           form={form}
           layout="vertical"
-          initialValues={{ qty: 1, receipt_date: dayjs(), verdict: "合格" }}
+          initialValues={{
+            qty: 1, receipt_date: dayjs(), verdict: "合格",
+            spec_result: "相符", appearance_result: "正常", colour_result: "正常",
+          }}
         >
           <div style={{ display: step === 0 ? "block" : "none" }}>
             <Row gutter={24}>
@@ -317,102 +421,150 @@ export default function ReceivingPage() {
               title={picked || form.getFieldValue("item_name")
                 ? `檢驗：${form.getFieldValue("model") || form.getFieldValue("item_name")}`
                 : "檢驗項目"}
-              description="逐項確認這批貨符不符合，對應驗收單的「檢驗項目」欄。"
+              description="對應驗收單的「檢驗項目」欄，一項一項往下確認。"
               style={{ marginBottom: 24 }}
             />
 
-            <Row gutter={24}>
-              <Col xs={24} md={8}>
-                <Form.Item label="規格尺寸" extra="主檔登記的規格，核對實物是否相符">
-                  <Space>
+            {/* One row per item, numbered, top to bottom. Laid out across three
+                columns it read as a wall of controls; the paper form is a
+                checklist and so is this. */}
+            <div style={{ maxWidth: 760 }}>
+              <SectionHeading>檢驗項目</SectionHeading>
+              {/* Two explicit options rather than a checkbox: an unticked box
+                  cannot say whether the item failed or was never looked at, and
+                  those are very different things on an inspection record. */}
+              <InspectionRow n={1} label="規格尺寸" hint="核對實物與主檔登記的規格">
+                <Space orientation="vertical" size={8} style={{ width: "100%" }}>
+                  <Space wrap>
                     <Input
                       value={form.getFieldValue("spec") || picked?.spec || "（未登記規格）"}
                       disabled
-                      style={{ width: 180 }}
+                      style={{ width: 200 }}
                     />
-                    <Form.Item name="spec_ok" valuePropName="checked" noStyle>
-                      <Checkbox>相符</Checkbox>
+                    <Form.Item name="spec_result" noStyle>
+                      <Radio.Group buttonStyle="solid">
+                        <Radio.Button value="相符">相符</Radio.Button>
+                        <Radio.Button value="不符">不符</Radio.Button>
+                      </Radio.Group>
                     </Form.Item>
                   </Space>
-                </Form.Item>
-              </Col>
-              <Col xs={24} md={8}>
-                <Form.Item name="manufacture_date" label="製造日期">
-                  <DatePicker style={{ width: "100%" }} />
-                </Form.Item>
-              </Col>
-              <Col xs={24} md={8}>
-                <Form.Item
-                  name="expiry_date" label="有效期限"
-                  rules={[{ required: needsExpiry, message: "此品項有效期，必須填有效期限" }]}
-                  extra={needsExpiry
-                    ? "這個品項有效期，必須填"
-                    : "此品項未標記有效期，留空是正常的"}
-                >
-                  <DatePicker style={{ width: "100%" }} />
-                </Form.Item>
-              </Col>
-            </Row>
+                  <Form.Item noStyle shouldUpdate={(a, b) => a.spec_result !== b.spec_result}>
+                    {({ getFieldValue }) => getFieldValue("spec_result") === "不符" ? (
+                      <Form.Item
+                        name="spec_note" noStyle
+                        rules={[{ required: true, message: "不符請說明" }]}
+                      >
+                        <Input placeholder="哪裡不符？" style={{ width: 360 }} />
+                      </Form.Item>
+                    ) : null}
+                  </Form.Item>
+                </Space>
+              </InspectionRow>
 
-            <Row gutter={24}>
-              <Col xs={24} md={4}>
-                <Form.Item name="appearance_ok" valuePropName="checked" label="外觀">
-                  <Checkbox>正常</Checkbox>
+              <InspectionRow n={2} label="製造日期" hint="同進貨日時，用來決定哪一批先領">
+                <Form.Item name="manufacture_date" noStyle>
+                  <DatePicker style={{ width: 220 }} placeholder="選日期" />
                 </Form.Item>
-              </Col>
-              <Col xs={24} md={4}>
-                <Form.Item name="colour_ok" valuePropName="checked" label="顏色">
-                  <Checkbox>正常</Checkbox>
+              </InspectionRow>
+
+              <InspectionRow
+                n={3}
+                label="有效期限"
+                required={needsExpiry}
+                hint={needsExpiry ? "這個品項有效期，必須填" : "此品項未標記有效期，留空是正常的"}
+              >
+                <Form.Item
+                  name="expiry_date"
+                  noStyle
+                  rules={[{ required: needsExpiry, message: "此品項有效期，必須填有效期限" }]}
+                >
+                  <DatePicker style={{ width: 220 }} placeholder="選日期" />
                 </Form.Item>
-              </Col>
-              <Col xs={24} md={6}>
-                <Form.Item name="verdict" label="判定">
+              </InspectionRow>
+
+              <InspectionRow n={4} label="外觀">
+                <CheckResult field="appearance" />
+              </InspectionRow>
+
+              <InspectionRow n={5} label="顏色">
+                <CheckResult field="colour" />
+              </InspectionRow>
+
+              <InspectionRow n={6} label="判定" hint="不合格會留紀錄，但不進可領用庫存">
+                <Form.Item name="verdict" noStyle>
                   <Radio.Group buttonStyle="solid">
                     <Radio.Button value="合格">合格</Radio.Button>
                     <Radio.Button value="不合格">不合格</Radio.Button>
                   </Radio.Group>
                 </Form.Item>
-              </Col>
-              <Col xs={24} md={10}>
-                <Form.Item name="remark" label="備註">
-                  <Input placeholder="不合格請寫原因" />
-                </Form.Item>
-              </Col>
-            </Row>
+              </InspectionRow>
 
-            <Form.Item noStyle shouldUpdate={(a, b) => a.verdict !== b.verdict}>
-              {({ getFieldValue }) => getFieldValue("verdict") === "不合格" ? (
-                <Alert
-                  type="warning"
-                  title="判定不合格：會留紀錄，但不進可領用庫存"
-                  description="這批仍然存在系統裡（誰收的、什麼時候、為什麼不合格），只是不計入在庫、FIFO 不會指到、也領不出來。請在備註寫原因。"
-                  style={{ marginBottom: 16 }}
-                />
-              ) : null}
-            </Form.Item>
-
-            <Row gutter={24}>
-              <Col xs={24} md={6}>
-                <Form.Item label="記錄人">
-                  <Input value={user?.name ?? ""} disabled suffix={<Text type="secondary">登入身分</Text>} />
+              <InspectionRow label="備註">
+                <Form.Item name="remark" noStyle>
+                  <Input placeholder="不合格請寫原因" style={{ width: 360 }} />
                 </Form.Item>
-              </Col>
-              <Col xs={24} md={6}>
-                <Form.Item
-                  name="confirmed_by" label="確認人"
-                  validateStatus={sameSigner ? "warning" : undefined}
-                  help={sameSigner ? "跟記錄人是同一個人" : undefined}
-                >
+              </InspectionRow>
+
+              <Form.Item
+                noStyle
+                shouldUpdate={(a, b) =>
+                  a.verdict !== b.verdict || a.appearance_result !== b.appearance_result
+                  || a.colour_result !== b.colour_result || a.spec_result !== b.spec_result}
+              >
+                {({ getFieldValue }) => {
+                  const failed = [
+                    getFieldValue("spec_result") === "不符" && "規格尺寸",
+                    getFieldValue("appearance_result") === "不正常" && "外觀",
+                    getFieldValue("colour_result") === "不正常" && "顏色",
+                  ].filter(Boolean);
+                  if (!failed.length || getFieldValue("verdict") === "不合格") return null;
+                  return (
+                    <Alert
+                      type="warning"
+                      title={`${failed.join("、")}有異常，判定卻是合格`}
+                      description="這樣寫是可以的（有些瑕疵不影響使用），但請確認是刻意的 —— 異常內容會留在紀錄裡。"
+                      style={{ marginBlock: 16 }}
+                    />
+                  );
+                }}
+              </Form.Item>
+
+              <Form.Item noStyle shouldUpdate={(a, b) => a.verdict !== b.verdict}>
+                {({ getFieldValue }) => getFieldValue("verdict") === "不合格" ? (
+                  <Alert
+                    type="warning"
+                    title="判定不合格：會留紀錄，但不進可領用庫存"
+                    description="這批仍然存在系統裡（誰收的、什麼時候、為什麼不合格），只是不計入在庫、FIFO 不會指到、也領不出來。請在備註寫原因。"
+                    style={{ marginBlock: 16 }}
+                  />
+                ) : null}
+              </Form.Item>
+
+              <div style={{ marginTop: 28 }}>
+                <SectionHeading>簽核</SectionHeading>
+              </div>
+
+              <InspectionRow label="記錄人" hint="登入身分，不能改">
+                <Input value={user?.name ?? ""} disabled style={{ width: 220 }} />
+              </InspectionRow>
+
+              <InspectionRow
+                label="確認人"
+                hint={sameSigner ? "跟記錄人是同一個人 —— 雙簽的意義就是兩個人" : "覆核這批的人"}
+              >
+                <Form.Item name="confirmed_by" noStyle>
                   <Select
                     allowClear
                     placeholder="選覆核的人"
+                    style={{ width: 220 }}
+                    status={sameSigner ? "warning" : undefined}
                     options={roster
                       .filter((r) => r.name !== user?.name)
                       .map((r) => ({ value: r.name, label: `${r.name}（${r.title ?? r.role_label}）` }))}
                   />
                 </Form.Item>
-              </Col>
-            </Row>
+              </InspectionRow>
+            </div>
 
             <Space>
               <Button size="large" onClick={() => setStep(0)}>上一步</Button>
