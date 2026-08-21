@@ -1,36 +1,36 @@
 "use client";
 
 /**
- * Issuing screen.
+ * 領用登錄 — photo first.
  *
- * A draw is three facts: what was taken, and which lot — which is to say its
- * 進貨日 and 製造日. So that is the whole required path: pick the item, pick the
- * lot, submit. Machine, product and meter reading are columns off the paper
- * form; they matter for traceability but none of them should stand between an
- * operator and recording that a box left the shelf, so they are optional and
- * folded away.
+ * The operator walks up with a box already in their hands. They know what it
+ * is; the system is the one that needs to find out. So the screen opens on a
+ * camera, not a dropdown, and the first thing it says back is a verdict:
+ * 可以拿 / 先別拿. Asking "which item are you drawing?" before the photo made
+ * the person do the identification and left the camera to confirm what they
+ * had already typed — backwards, and it quietly narrowed the candidate set by
+ * hand, which is the one thing §2.2 says the machine must not be helped with.
  *
- * Recognition is an optional shortcut on top, not the way in —
- * requirement section 2.3 already said the manual path is the permanent one
- * ("辨識可斷，系統不可斷"), and until the recognition PoC has real numbers
- * behind it, making it the entrance would be betting the whole flow on it.
+ * The manual path is still permanently reachable (§2.3 辨識可斷，系統不可斷) —
+ * one tap away, and entered automatically whenever recognition cannot resolve
+ * the box. It is a fallback now, not the front door.
+ *
+ * Copy on a blocked draw is "已記錄，請換一箱", never "失敗". A failure message
+ * invites re-shooting the box until it passes; this wording says the record
+ * already exists and re-shooting changes nothing (§2.1).
  *
  * Deviates from ChimesFlow density on purpose (declared mode-b override):
  * 64px touch targets and oversized type, because this is used with gloves on,
  * standing, possibly backlit. The verdict is a full colour block, not a toast.
- *
- * The copy on a blocked draw is "已記錄，請換一箱", never "失敗". A failure
- * message invites the operator to photograph the box again until it passes;
- * this wording says plainly that the record already exists and re-shooting
- * changes nothing (requirement section 2.1).
  */
 
 import {
-  CameraOutlined, InboxOutlined, ReloadOutlined, UnorderedListOutlined,
+  CameraOutlined, CheckCircleFilled, CloseCircleFilled, InboxOutlined,
+  QuestionCircleFilled, ReloadOutlined, UnorderedListOutlined, VideoCameraOutlined,
 } from "@ant-design/icons";
 import {
   Alert, Button, Card, Col, Collapse, Empty, Form, Input, InputNumber, Radio,
-  Row, Segmented, Select, Space, Spin, Tag, Tooltip, Typography, message,
+  Row, Select, Space, Spin, Tag, Tooltip, Typography, message,
 } from "antd";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
@@ -40,8 +40,13 @@ import { api, type Dictionary, type Item, type Lot, type Proposal } from "@/lib/
 const { Title, Text } = Typography;
 
 const TOUCH = 64;
+const OK = "#52c41a";
+const BAD = "#ff4d4f";
+const WARN = "#faad14";
 
 type Verdict = { status: string; id: number; expected?: string } | null;
+/** 拍照 → 判定；認不出來才進手動 */
+type Stage = "拍照" | "判定" | "手動";
 
 export default function IssuePage() {
   return (
@@ -55,6 +60,8 @@ function IssueScreen() {
   const params = useSearchParams();
   const [items, setItems] = useState<Item[]>([]);
   const [dict, setDict] = useState<Dictionary | null>(null);
+  const [cameraOn, setCameraOn] = useState(false);
+  const [stage, setStage] = useState<Stage>("拍照");
   const [itemId, setItemId] = useState<number>();
   const [lots, setLots] = useState<Lot[]>([]);
   const [lotId, setLotId] = useState<number>();
@@ -64,11 +71,6 @@ function IssueScreen() {
   const [qty, setQty] = useState(1);
   const [busy, setBusy] = useState(false);
   const [scanning, setScanning] = useState(false);
-  // An explicit choice rather than a button in the corner: recognition and
-  // manual entry are two ways of doing the same job, and which one is in play
-  // changes what the screen is asking for. A small button made it look like an
-  // extra, so nobody would reach for it — or would not know it existed.
-  const [mode, setMode] = useState<"手動選擇" | "影像辨識">("手動選擇");
   const [capture, setCapture] = useState<Proposal | null>(null);
   const [verdict, setVerdict] = useState<Verdict>(null);
   const [form] = Form.useForm();
@@ -78,74 +80,68 @@ function IssueScreen() {
   const products = (dict?.entries.packed_product ?? []).map((e) => e.value);
 
   useEffect(() => {
-    Promise.allSettled([api.items(), api.dictionary()]).then(([i, d]) => {
-      if (i.status === "fulfilled") {
-        setItems(i.value);
-        const requested = params.get("item");
-        const usable = (requested && i.value.find((r) => String(r.id) === requested))
-          ?? i.value.find((r) => r.on_hand > 0);
-        if (usable) setItemId(usable.id);
-      } else {
-        message.error(`品項載入失敗：${i.reason?.message}`);
-      }
+    Promise.allSettled([api.items(), api.dictionary(), api.camera()]).then(([i, d, c]) => {
+      if (i.status === "fulfilled") setItems(i.value);
+      else message.error(`品項載入失敗：${i.reason?.message}`);
       if (d.status === "fulfilled") setDict(d.value);
+      if (c.status === "fulfilled") setCameraOn(c.value.enabled && Boolean(c.value.endpoint));
+      // Arriving from 庫存總覽's 領用 link names the item, which is a deliberate
+      // manual entry — honour it rather than demanding a photo.
+      const requested = params.get("item");
+      if (requested && i.status === "fulfilled" && i.value.some((r) => String(r.id) === requested)) {
+        setItemId(Number(requested));
+        setStage("手動");
+      }
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const loadLots = useCallback(async (id: number) => {
+  const loadLots = useCallback(async (id: number, prefer?: number) => {
     try {
       const rows = await api.lots(id);
       const drawable = rows.filter((l) => l.qty_on_hand > 0 && l.verdict !== "不合格");
       setLots(drawable);
       // Default to what FIFO wants. Pre-selecting the right answer means the
       // common case is one tap, and choosing otherwise is a deliberate act.
-      const fifo = drawable.find((l) => l.is_fifo_next);
-      setLotId(fifo?.id ?? drawable[0]?.id);
+      setLotId(prefer ?? drawable.find((l) => l.is_fifo_next)?.id ?? drawable[0]?.id);
+      return drawable;
     } catch (e) {
       message.error((e as Error).message);
+      return [];
     }
   }, []);
 
   useEffect(() => {
-    if (itemId) loadLots(itemId);
-    else { setLots([]); setLotId(undefined); }
-  }, [itemId, loadLots]);
+    if (stage === "手動" && itemId) loadLots(itemId);
+    else if (!itemId) { setLots([]); setLotId(undefined); }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [itemId, stage]);
 
   const selected = items.find((i) => i.id === itemId);
   const fifoLot = useMemo(() => lots.find((l) => l.is_fifo_next) ?? null, [lots]);
-  const chosen = lots.find((l) => l.id === lotId);
+  const chosenLot = lots.find((l) => l.id === lotId);
   // Only warn about a genuinely later lot. A same-day lot is accepted by the
   // judgement, so warning about it would be crying wolf.
-  const takingWrongLot = Boolean(chosen && !chosen.is_fifo_next && !chosen.fifo_also_ok);
-  const chosenLot = lots.find((l) => l.id === lotId);
-  useEffect(() => { setQty(1); }, [lotId]);
+  const takingWrongLot = Boolean(chosenLot && !chosenLot.is_fifo_next && !chosenLot.fifo_also_ok);
 
-  async function onCapture(file: File) {
+  async function runScan(source: () => Promise<Proposal>) {
     setScanning(true);
     try {
-      const result = await api.recognize(file);
+      const result = await source();
       setCapture(result);
-      if (result.item_id) {
-        setItemId(result.item_id);
-        const rows = await api.lots(result.item_id);
-        const drawable = rows.filter((l) => l.qty_on_hand > 0 && l.verdict !== "不合格");
-        setLots(drawable);
-        setLotId(result.locked_lot?.lot_id ?? drawable.find((l) => l.is_fifo_next)?.id);
-        message.success(
-          result.locked_lot
-            ? `辨識到 ${result.item_label}，進貨日 ${result.locked_lot.receipt_date}`
-            : `辨識到 ${result.item_label}，但讀不出進貨日，請自己挑批次`,
-        );
-      } else {
-        // Falling back rather than leaving them on a screen that cannot proceed:
-        // requirement section 2.3 — recognition may fail, the system may not.
-        setMode("手動選擇");
-        message.warning("辨識不出是哪個品項，已切回手動選擇");
+      if (!result.item_id) {
+        // Recognition may fail, the system may not (§2.3). Drop into manual with
+        // the reason on screen rather than leaving them somewhere unusable.
+        setStage("手動");
+        setItemId(undefined);
+        return;
       }
+      setItemId(result.item_id);
+      await loadLots(result.item_id, result.locked_lot?.lot_id);
+      setStage("判定");
     } catch (e) {
-      setMode("手動選擇");
-      message.error(`${(e as Error).message}　已切回手動選擇`);
+      setStage("手動");
+      message.error(`${(e as Error).message}　已切到手動登錄`);
     } finally {
       setScanning(false);
       if (fileRef.current) fileRef.current.value = "";
@@ -178,122 +174,145 @@ function IssueScreen() {
     }
   }
 
-  function reset() {
+  function reset(to: Stage = "拍照") {
     setCapture(null);
     setVerdict(null);
     setQty(1);
     form.resetFields();
-    if (itemId) loadLots(itemId);
+    setStage(to);
+    if (to === "拍照") { setItemId(undefined); setLots([]); setLotId(undefined); }
   }
 
-  if (verdict) return <VerdictBlock verdict={verdict} onNext={reset} />;
+  if (verdict) return <VerdictBlock verdict={verdict} onNext={() => reset("拍照")} />;
+
+  const scanButtons = (
+    <>
+      <input
+        ref={fileRef}
+        type="file"
+        accept="image/*"
+        capture="environment"
+        style={{ display: "none" }}
+        onChange={(e) => e.target.files?.[0] && runScan(() => api.recognize(e.target.files![0]))}
+      />
+      <Space orientation="vertical" size={12} style={{ width: "100%" }}>
+        <Button
+          type="primary"
+          size="large"
+          icon={<CameraOutlined />}
+          loading={scanning}
+          onClick={() => fileRef.current?.click()}
+          style={{ height: 96, fontSize: 26, width: "100%" }}
+        >
+          拍這一箱
+        </Button>
+        {cameraOn && (
+          <Button
+            size="large"
+            icon={<VideoCameraOutlined />}
+            loading={scanning}
+            onClick={() => runScan(api.captureFromCamera)}
+            style={{ height: TOUCH, fontSize: 18, width: "100%" }}
+          >
+            用固定相機拍
+          </Button>
+        )}
+      </Space>
+    </>
+  );
 
   return (
     <>
       <Title level={3} style={{ marginTop: 0 }}>領用登錄</Title>
 
-      <Card
-        title="1. 選品項"
-        extra={
-          <Segmented
-            value={mode}
-            onChange={(v) => {
-              setMode(v as "手動選擇" | "影像辨識");
-              setCapture(null);
-            }}
-            options={[
-              { value: "手動選擇", label: <Space size={4}><UnorderedListOutlined />手動選擇</Space> },
-              { value: "影像辨識", label: <Space size={4}><CameraOutlined />影像辨識</Space> },
-            ]}
-          />
-        }
-      >
-        <input
-          ref={fileRef}
-          type="file"
-          accept="image/*"
-          capture="environment"
-          style={{ display: "none" }}
-          onChange={(e) => e.target.files?.[0] && onCapture(e.target.files[0])}
+      {stage === "拍照" && (
+        <Card>
+          {scanning ? (
+            <div style={{ textAlign: "center", padding: "48px 0" }}>
+              <Spin size="large" />
+              <div style={{ fontSize: 20, marginTop: 20 }}>辨識中，看是哪一箱…</div>
+            </div>
+          ) : (
+            <>
+              <div style={{ fontSize: 22, fontWeight: 600, marginBottom: 8 }}>
+                把箱子放好，拍側面的標籤和紅色驗收章
+              </div>
+              <Text type="secondary" style={{ fontSize: 16, display: "block", marginBottom: 24 }}>
+                不用先選要領什麼 —— 拍完系統會告訴你這箱能不能拿出去。
+              </Text>
+              {scanButtons}
+              <div style={{ marginTop: 24, textAlign: "center" }}>
+                <Button
+                  type="link"
+                  icon={<UnorderedListOutlined />}
+                  onClick={() => setStage("手動")}
+                  style={{ fontSize: 16 }}
+                >
+                  相機壞了 / 這箱沒有標籤 → 手動登錄
+                </Button>
+              </div>
+            </>
+          )}
+        </Card>
+      )}
+
+      {stage === "判定" && capture && (
+        <ScanVerdict
+          capture={capture}
+          lots={lots}
+          onRetake={() => reset("拍照")}
+          onManual={() => setStage("手動")}
         />
+      )}
 
-        {mode === "影像辨識" ? (
-          <>
-            <Button
-              type="primary"
-              size="large"
-              icon={<CameraOutlined />}
-              loading={scanning}
-              onClick={() => fileRef.current?.click()}
-              style={{ height: TOUCH, fontSize: 20, width: "100%" }}
-            >
-              {capture ? "重拍" : "拍照或選擇照片"}
-            </Button>
-            <Text type="secondary" style={{ display: "block", marginTop: 12 }}>
-              對準側面的標籤和紅色驗收章。認得出就自動帶入品項與批次；
-              認不出會切回手動，不會卡住你。
-            </Text>
-          </>
-        ) : (
-          <>
-            <Select
-              size="large"
-              style={{ width: "100%", height: TOUCH }}
-              value={itemId}
-              onChange={(v) => { setItemId(v); setCapture(null); }}
-              showSearch
-              optionFilterProp="label"
-              placeholder="選要領用的品項"
-              options={items.map((i) => ({
-                value: i.id,
-                label: `${i.label}｜${i.name}${i.spec ? ` ${i.spec}` : ""}（在庫 ${i.on_hand} 箱）`,
-                disabled: i.on_hand === 0,
-              }))}
+      {stage === "手動" && (
+        <Card
+          title="選品項"
+          extra={
+            <Button icon={<CameraOutlined />} onClick={() => reset("拍照")}>改用拍照</Button>
+          }
+        >
+          {capture && !capture.item_id && (
+            <Alert
+              style={{ marginBottom: 16 }}
+              type="warning"
+              title="這張照片認不出是哪個品項，請自己選"
+              description={
+                <Space orientation="vertical" size={2}>
+                  <span>
+                    標籤讀到：{capture.recognition.model_code ?? capture.recognition.item_code ?? "讀不出型號"}
+                    ｜章：{capture.recognition.receipt_date ?? "讀不出"}
+                  </span>
+                  {capture.recognition.notes && (
+                    <Text type="secondary">{capture.recognition.notes}</Text>
+                  )}
+                  <Text type="secondary">照片已留存，會跟著這筆紀錄一起存檔。</Text>
+                </Space>
+              }
+              action={<Button size="small" icon={<ReloadOutlined />} onClick={() => reset("拍照")}>重拍</Button>}
             />
-            <Text type="secondary" style={{ display: "block", marginTop: 12 }}>
-              在庫 0 的品項不能選。
-            </Text>
-          </>
-        )}
-
-        {capture && (
-          <Alert
-            style={{ marginTop: 16 }}
-            type={capture.item_id ? "info" : "warning"}
-            title={capture.item_id ? `已由照片帶入：${capture.item_label}` : "照片認不出品項，已切回手動"}
-            description={
-              <Space orientation="vertical" size={2}>
-                <span>
-                  標籤讀到型號：{capture.recognition.model_code
-                    ?? capture.recognition.item_code ?? "讀不出"}
-                  ｜章：{capture.recognition.receipt_date ?? "讀不出"}
-                </span>
-                {capture.recognition.notes && (
-                  <Text type="secondary">{capture.recognition.notes}</Text>
-                )}
-              </Space>
-            }
-            action={<Button size="small" icon={<ReloadOutlined />} onClick={reset}>清除</Button>}
+          )}
+          <Select
+            size="large"
+            style={{ width: "100%", height: TOUCH }}
+            value={itemId}
+            onChange={setItemId}
+            showSearch
+            optionFilterProp="label"
+            placeholder="選要領用的品項"
+            options={items.map((i) => ({
+              value: i.id,
+              label: `${i.label}｜${i.name}${i.spec ? ` ${i.spec}` : ""}（在庫 ${i.on_hand} 箱）`,
+              disabled: i.on_hand === 0,
+            }))}
           />
-        )}
+          <Text type="secondary" style={{ display: "block", marginTop: 12 }}>
+            在庫 0 的品項不能選。
+          </Text>
+        </Card>
+      )}
 
-        {mode === "影像辨識" && itemId && (
-          <div style={{ marginTop: 16 }}>
-            {/* Only claim recognition when a photo actually produced this. An
-                item carried over from a manual pick is not something the camera
-                found, and saying so would make the screen untrustworthy on the
-                one thing it most needs to be honest about. */}
-            <Text type="secondary">
-              {capture?.item_id === itemId ? "照片辨識到：" : "目前選定（手動）："}
-            </Text>{" "}
-            <Text strong style={{ fontSize: 18 }}>{selected?.label}</Text>{" "}
-            <Text>{selected?.name}</Text>{" "}
-            <Button size="small" type="link" onClick={() => setMode("手動選擇")}>換一個</Button>
-          </div>
-        )}
-      </Card>
-
-      {itemId && lots.length === 0 && (
+      {stage !== "拍照" && itemId && lots.length === 0 && (
         <Card title="還不能領用" style={{ marginTop: 24 }}>
           <Empty
             image={Empty.PRESENTED_IMAGE_SIMPLE}
@@ -306,76 +325,82 @@ function IssueScreen() {
         </Card>
       )}
 
-      {lots.length > 0 && (
+      {stage !== "拍照" && lots.length > 0 && (
         <>
-          <Card title="2. 選批次（先進先出看製造日）" style={{ marginTop: 24 }}>
-            <Radio.Group
-              value={lotId}
-              onChange={(e) => setLotId(e.target.value)}
-              style={{ display: "block" }}
-            >
-              <Space orientation="vertical" style={{ width: "100%" }} size={12}>
-                {lots.map((lot) => (
-                  <Radio
-                    key={lot.id}
-                    value={lot.id}
-                    style={{
-                      width: "100%", minHeight: TOUCH, padding: "12px 16px",
-                      border: `1px solid ${lot.id === lotId ? "#1677ff" : "#d9d9d9"}`,
-                      borderRadius: 6, fontSize: 18,
-                      background: lot.id === lotId ? "#e6f4ff" : "#fff",
-                    }}
-                  >
-                    <Space wrap>
-                      {/* Manufacture date leads: it is what FIFO sorts on, so it
-                          is what someone should be reading off the box. */}
-                      <span style={{ fontSize: 18, fontWeight: 600 }}>
-                        製造 {lot.manufacture_date ?? "未填"}
-                      </span>
-                      {lot.is_fifo_next && <Tag color="green">FIFO 應領</Tag>}
-                      {lot.fifo_also_ok && (
-                        <Tooltip title="跟應領那批同一個製造日，領這批也合法，不會被擋">
-                          <Tag>同製造日．可領</Tag>
-                        </Tooltip>
-                      )}
-                      <Text type="secondary">進貨 {lot.receipt_date}</Text>
-                      {lot.effective_expiry && (
-                        <Text type={lot.days_left != null && lot.days_left <= 90 ? "danger" : "secondary"}>
-                          有效 {lot.effective_expiry}
-                          {lot.days_left != null && `（剩 ${lot.days_left} 天）`}
-                        </Text>
-                      )}
-                      <Text type="secondary">在庫 {lot.qty_on_hand} 箱</Text>
-                    </Space>
-                  </Radio>
-                ))}
-              </Space>
-            </Radio.Group>
+          {/* On the recognised path the lot is already decided, so the picker
+              only appears when a human has to make the call — either they came
+              in manually, or the stamp could not be read. */}
+          {(stage === "手動" || !capture?.locked_lot) && (
+            <Card title="選批次（先進先出看製造日）" style={{ marginTop: 24 }}>
+              <Radio.Group
+                value={lotId}
+                onChange={(e) => setLotId(e.target.value)}
+                style={{ display: "block" }}
+              >
+                <Space orientation="vertical" style={{ width: "100%" }} size={12}>
+                  {lots.map((lot) => (
+                    <Radio
+                      key={lot.id}
+                      value={lot.id}
+                      style={{
+                        width: "100%", minHeight: TOUCH, padding: "12px 16px",
+                        border: `1px solid ${lot.id === lotId ? "#1677ff" : "#d9d9d9"}`,
+                        borderRadius: 6, fontSize: 18,
+                        background: lot.id === lotId ? "#e6f4ff" : "#fff",
+                      }}
+                    >
+                      <Space wrap>
+                        {/* Manufacture date leads: it is what FIFO sorts on, so
+                            it is what someone should be reading off the box. */}
+                        <span style={{ fontSize: 18, fontWeight: 600 }}>
+                          製造 {lot.manufacture_date ?? "未填"}
+                        </span>
+                        {lot.is_fifo_next && <Tag color="green">FIFO 應領</Tag>}
+                        {lot.fifo_also_ok && (
+                          <Tooltip title="跟應領那批同一個製造日，領這批也合法，不會被擋">
+                            <Tag>同製造日．可領</Tag>
+                          </Tooltip>
+                        )}
+                        <Text type="secondary">進貨 {lot.receipt_date}</Text>
+                        {lot.effective_expiry && (
+                          <Text type={lot.days_left != null && lot.days_left <= 90 ? "danger" : "secondary"}>
+                            有效 {lot.effective_expiry}
+                            {lot.days_left != null && `（剩 ${lot.days_left} 天）`}
+                          </Text>
+                        )}
+                        <Text type="secondary">在庫 {lot.qty_on_hand} 箱</Text>
+                      </Space>
+                    </Radio>
+                  ))}
+                </Space>
+              </Radio.Group>
 
-            {lots.length > 0 && lots[0].fifo_basis === "進貨日期" && (
-              <Alert
-                style={{ marginTop: 16 }}
-                type="warning"
-                title="這個品項的批次都沒填製造日期，暫時改用進貨日排序"
-                description="先進先出看的是製造日期。沒有製造日就只能退而求其次用進貨日 —— 補上製造日期後排序才會準。"
-              />
-            )}
+              {lots[0].fifo_basis === "進貨日期" && (
+                <Alert
+                  style={{ marginTop: 16 }}
+                  type="warning"
+                  title="這個品項的批次都沒填製造日期，暫時改用進貨日排序"
+                  description="先進先出看的是製造日期。沒有製造日就只能退而求其次用進貨日 —— 補上製造日期後排序才會準。"
+                />
+              )}
 
-            {takingWrongLot && (
-              <Alert
-                style={{ marginTop: 16 }}
-                type="warning"
-                title="這不是 FIFO 應領的那批"
-                description={
-                  `應領用製造日 ${fifoLot?.manufacture_date ?? fifoLot?.receipt_date} 那批`
-                  + `（進貨 ${fifoLot?.receipt_date}）。仍然可以送出 —— 系統會記錄下來並擋住扣帳，等主管覆核。`
-                }
-              />
-            )}
-          </Card>
+              {takingWrongLot && (
+                <Alert
+                  style={{ marginTop: 16 }}
+                  type="warning"
+                  title="這不是 FIFO 應領的那批"
+                  description={
+                    `應領用製造日 ${fifoLot?.manufacture_date ?? fifoLot?.receipt_date} 那批`
+                    + `（進貨 ${fifoLot?.receipt_date}）。仍然可以送出 —— 系統會記錄下來並擋住扣帳，等主管覆核。`
+                  }
+                />
+              )}
+            </Card>
+          )}
 
-          <Card title="3. 數量" style={{ marginTop: 24 }}>
-            <Space align="center" size={16} wrap>
+          <Card style={{ marginTop: 24 }}>
+            <Space align="center" size={16} wrap style={{ marginBottom: 20 }}>
+              <Text style={{ fontSize: 18 }}>領幾箱</Text>
               <Button
                 size="large" style={{ height: TOUCH, width: TOUCH, fontSize: 28 }}
                 disabled={qty <= 1}
@@ -398,14 +423,9 @@ function IssueScreen() {
               >
                 ＋
               </Button>
-              <Text style={{ fontSize: 18 }}>箱</Text>
-              <Text type="secondary">
-                這批在庫 {chosenLot?.qty_on_hand ?? 0} 箱
-              </Text>
+              <Text type="secondary">這批在庫 {chosenLot?.qty_on_hand ?? 0} 箱</Text>
             </Space>
-          </Card>
 
-          <Card style={{ marginTop: 24 }}>
             <Form form={form} layout="vertical" size="large">
               <Collapse
                 ghost
@@ -448,25 +468,107 @@ function IssueScreen() {
                 size="large"
                 loading={busy}
                 disabled={!lotId}
+                danger={takingWrongLot}
                 onClick={submit}
                 style={{ height: TOUCH, fontSize: 20, width: "100%", marginTop: 8 }}
               >
-                送出領用
+                {takingWrongLot ? `還是要領這箱（會記錄、不扣帳）` : `確認領用 ${qty} 箱`}
               </Button>
               <Text type="secondary" style={{ display: "block", marginTop: 12, textAlign: "center" }}>
                 {selected && chosenLot
-                  ? `領用 ${selected.label} ${qty} 箱｜製造 ${chosenLot.manufacture_date ?? "未填"}｜進貨 ${chosenLot.receipt_date}`
+                  ? `${selected.label}｜${qty} 箱｜製造 ${chosenLot.manufacture_date ?? "未填"}｜進貨 ${chosenLot.receipt_date}`
                   : "選好品項與批次就可以送出"}
               </Text>
             </Form>
           </Card>
         </>
       )}
+    </>
+  );
+}
 
-      {scanning && !capture && (
-        <Card style={{ marginTop: 24, textAlign: "center" }} title="辨識中">
-          <Spin size="large" />
-        </Card>
+/**
+ * The answer to the only question the operator asked: can this box go out?
+ *
+ * Colour and heading carry the verdict on their own, because it gets read from
+ * a few steps away before anyone leans in for the detail.
+ */
+function ScanVerdict({ capture, lots, onRetake, onManual }: {
+  capture: Proposal; lots: Lot[]; onRetake: () => void; onManual: () => void;
+}) {
+  const locked = capture.locked_lot;
+  const fifoLot = lots.find((l) => l.is_fifo_next) ?? null;
+
+  // Three states, and they are genuinely different: this box is fine / this box
+  // is the wrong one / we could not tell which box this is. Collapsing the last
+  // two into "failed" would tell someone to go swap a box we never identified.
+  const state = !locked ? "unknown" : capture.fifo_ok ? "ok" : "wrong";
+  const colour = state === "ok" ? OK : state === "wrong" ? BAD : WARN;
+  const heading = state === "ok" ? "可以拿" : state === "wrong" ? "這箱先別拿" : "認得出品項，但讀不出是哪一批";
+  const Icon = state === "ok" ? CheckCircleFilled : state === "wrong" ? CloseCircleFilled : QuestionCircleFilled;
+
+  return (
+    <>
+      <div style={{ background: colour, borderRadius: 8, color: "#fff", padding: 32 }}>
+        <Space size={16} align="start">
+          <Icon style={{ fontSize: 52 }} />
+          <div>
+            <div style={{ fontSize: 44, fontWeight: 700, lineHeight: 1.15 }}>{heading}</div>
+            <div style={{ fontSize: 24, marginTop: 10 }}>
+              {capture.item_name}
+              {capture.item_model && (
+                <span style={{ opacity: 0.85, fontSize: 20 }}>　{capture.item_model}</span>
+              )}
+            </div>
+          </div>
+        </Space>
+
+        {state === "ok" && locked && (
+          <div style={{ fontSize: 20, marginTop: 20, lineHeight: 1.7 }}>
+            製造 {locked.manufacture_date ?? "未填"}
+            ｜進貨 {locked.receipt_date}
+            ｜這批還有 {locked.qty_on_hand} 箱
+            <div style={{ opacity: 0.9, fontSize: 17, marginTop: 4 }}>
+              這就是先進先出該領的那一批。
+            </div>
+          </div>
+        )}
+
+        {state === "wrong" && locked && (
+          <div style={{ fontSize: 20, marginTop: 20, lineHeight: 1.7 }}>
+            <div>你這箱：製造 {locked.manufacture_date ?? "未填"}（進貨 {locked.receipt_date}）</div>
+            <div style={{ fontWeight: 700 }}>
+              該拿的是：製造 {capture.fifo_expected_date} 那批
+              {fifoLot && `（進貨 ${fifoLot.receipt_date}，還有 ${fifoLot.qty_on_hand} 箱）`}
+            </div>
+          </div>
+        )}
+
+        {state === "unknown" && (
+          <div style={{ fontSize: 19, marginTop: 20, lineHeight: 1.7 }}>
+            章讀到「{capture.recognition.receipt_date ?? "讀不出"}」，跟在庫的批次都對不起來。
+            <div style={{ opacity: 0.9, fontSize: 17 }}>照片已留存。請在下面挑正確的批次。</div>
+          </div>
+        )}
+      </div>
+
+      <Space style={{ marginTop: 16 }} wrap>
+        <Button icon={<ReloadOutlined />} onClick={onRetake} style={{ height: 48, fontSize: 16 }}>
+          {state === "wrong" ? "去換一箱，重拍" : "重拍"}
+        </Button>
+        <Button type="link" onClick={onManual} style={{ fontSize: 16 }}>辨識錯了？改手動選</Button>
+        {capture.image_path && (
+          <a href={capture.image_path} target="_blank" rel="noreferrer" style={{ fontSize: 16 }}>看照片</a>
+        )}
+      </Space>
+
+      {state === "wrong" && (
+        <Alert
+          style={{ marginTop: 16 }}
+          type="warning"
+          title="還是要領這箱的話，往下送出"
+          description="系統會完整記錄下來（誰、何時、拿了哪批、應拿哪批、照片），但不扣帳，等主管覆核。重拍不會讓這筆紀錄消失。"
+        />
       )}
     </>
   );
@@ -475,7 +577,7 @@ function IssueScreen() {
 function VerdictBlock({ verdict, onNext }: { verdict: NonNullable<Verdict>; onNext: () => void }) {
   const blocked = verdict.status === "blocked_fifo";
   const unreadable = verdict.status === "blocked_unreadable";
-  const background = blocked ? "#ff4d4f" : unreadable ? "#faad14" : "#52c41a";
+  const background = blocked ? BAD : unreadable ? WARN : OK;
   const heading = blocked ? "已記錄，請換一箱" : unreadable ? "已記錄，待人工補批次" : "已登錄";
 
   return (
@@ -493,7 +595,7 @@ function VerdictBlock({ verdict, onNext }: { verdict: NonNullable<Verdict>; onNe
       )}
       <Text style={{ color: "#fff", fontSize: 18, marginTop: 24, opacity: 0.9 }}>
         {blocked
-          ? `這一筆已存成紀錄 #${verdict.id}，包含時間與登記人。重拍或重送不會讓它消失，請去拿較早進貨的那箱。`
+          ? `這一筆已存成紀錄 #${verdict.id}，包含時間與登記人。重拍或重送不會讓它消失，請去拿製造日較早的那箱。`
           : `紀錄 #${verdict.id} 已建立。`}
       </Text>
       <Button

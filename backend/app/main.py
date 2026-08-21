@@ -1319,12 +1319,18 @@ async def _recognise_path(path: Path, data: bytes, item_id: int | None) -> dict:
                         "fifo_ok": None, "fifo_expected_date": None})
         return payload
 
-    payload.update(_lot_lookup(resolved, reading.receipt_date))
+    payload.update(_lot_lookup(resolved, reading.receipt_date, reading.manufacture_date))
     return payload
 
 
-def _lot_lookup(item_id: int, read_receipt_date: str | None) -> dict:
-    """Match a read receipt date against the item's drawable lots, and judge FIFO."""
+def _lot_lookup(item_id: int, read_receipt_date: str | None,
+                read_manufacture_date: str | None = None) -> dict:
+    """Match the dates read off the box against this item's drawable lots.
+
+    Both dates go in. 製造日 identifies the lot when it can (it is the FIFO key
+    and it is printed rather than stamped); 進貨日 settles it when two lots were
+    made the same day.
+    """
     with transaction() as conn:
         candidates = _candidates(conn, item_id)
         item = conn.execute("SELECT * FROM inventory_item WHERE id = ?", (item_id,)).fetchone()
@@ -1332,7 +1338,11 @@ def _lot_lookup(item_id: int, read_receipt_date: str | None) -> dict:
             "SELECT * FROM inventory_lot WHERE item_id = ? AND qty_on_hand > 0"
             " AND COALESCE(verdict, '合格') <> '不合格'", (item_id,)).fetchall()}
 
-    result = match_candidates(to_date_key(read_receipt_date), candidates)
+    result = match_candidates(
+        to_date_key(read_receipt_date),
+        candidates,
+        manufacture=to_date_key(read_manufacture_date),
+    )
     out: dict = {
         "item_id": item_id,
         "item_name": item["name"] if item else None,
@@ -1348,6 +1358,10 @@ def _lot_lookup(item_id: int, read_receipt_date: str | None) -> dict:
         ],
         "decision": result.decision.value,
         "defer_reason": result.reason.value if result.reason else None,
+        # Which date on the box actually named the lot. A lock off the printed
+        # 製造日 is a stronger claim than one off the hand-stamped 進貨日, and
+        # the record should be able to say which it was.
+        "lot_matched_on": result.matched_on,
         "match_distance": result.best_distance,
         "fifo_target_lot_id": int(fifo_target(candidates)) if fifo_target(candidates) else None,
         "fifo_basis": fifo_basis(candidates),
@@ -1372,6 +1386,7 @@ def _lot_lookup(item_id: int, read_receipt_date: str | None) -> dict:
 class ResolveIn(BaseModel):
     item_id: int
     ocr_receipt_date: str | None = None
+    ocr_manufacture_date: str | None = None
 
 
 @app.post("/api/resolve-item")
@@ -1383,7 +1398,7 @@ def resolve_item(payload: ResolveIn, user: dict = Depends(requires("issue.create
     return a *different* reading, which would be confusing on screen.
     """
     return {
-        **_lot_lookup(payload.item_id, payload.ocr_receipt_date),
+        **_lot_lookup(payload.item_id, payload.ocr_receipt_date, payload.ocr_manufacture_date),
         "item_match": {"decision": "lock", "item_id": payload.item_id,
                        "matched_on": "manual", "reason": None, "contenders": []},
     }

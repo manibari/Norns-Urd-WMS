@@ -122,12 +122,19 @@ class Candidate:
 
     lot_id: str
     receipt_date: str          # ISO, authoritative — it came from receiving, not from a photo
-    manufacture_date: str | None = None   # tie-breaker when two lots arrived the same day
+    manufacture_date: str | None = None   # the FIFO key; printed by the supplier
 
     @property
     def key(self) -> str:
         parsed = to_date_key(self.receipt_date)
         return parsed.key if parsed else self.receipt_date
+
+    @property
+    def manufacture_key(self) -> str | None:
+        if not self.manufacture_date:
+            return None
+        parsed = to_date_key(self.manufacture_date)
+        return parsed.key if parsed else self.manufacture_date
 
 
 @dataclass(frozen=True)
@@ -137,27 +144,30 @@ class MatchResult:
     best_distance: float | None
     runner_up_distance: float | None
     reason: DeferReason | None = None
+    # Which date on the box identified the lot. Worth recording: a lock off the
+    # printed 製造日 is a stronger claim than one off the hand-stamped 進貨日.
+    matched_on: str | None = None
 
     @property
     def locked(self) -> bool:
         return self.decision is Decision.LOCK
 
 
-def match_candidates(
-    recognized: DateKey | None,
+def _match_on(
+    recognized: DateKey,
     candidates: list[Candidate],
-    *,
-    max_distance: float = 1.5,
-    min_margin: float = 1.0,
+    key_of,
+    field: str,
+    max_distance: float,
+    min_margin: float,
 ) -> MatchResult:
-    """Match a recognised receipt date against the lots currently in stock."""
-    if not candidates:
-        return MatchResult(Decision.DEFER, None, None, None, DeferReason.NO_CANDIDATES)
-    if recognized is None:
-        return MatchResult(Decision.DEFER, None, None, None, DeferReason.NO_RECOGNITION)
+    """Score one read date against one field of the candidate lots."""
+    usable = [c for c in candidates if key_of(c)]
+    if not usable:
+        return MatchResult(Decision.DEFER, None, None, None, DeferReason.NO_CANDIDATES, field)
 
     scored = sorted(
-        ((confusion_distance(recognized.key, c.key), c) for c in candidates),
+        ((confusion_distance(recognized.key, key_of(c)), c) for c in usable),
         key=lambda pair: pair[0],
     )
     best_distance, best = scored[0]
@@ -166,16 +176,69 @@ def match_candidates(
     if best_distance > max_distance:
         return MatchResult(
             Decision.DEFER, None, best_distance, runner_up_distance,
-            DeferReason.NO_CANDIDATE_IN_RANGE,
+            DeferReason.NO_CANDIDATE_IN_RANGE, field,
         )
 
     if runner_up_distance is not None and (runner_up_distance - best_distance) < min_margin:
         return MatchResult(
             Decision.DEFER, None, best_distance, runner_up_distance,
-            DeferReason.AMBIGUOUS,
+            DeferReason.AMBIGUOUS, field,
         )
 
-    return MatchResult(Decision.LOCK, best.lot_id, best_distance, runner_up_distance)
+    return MatchResult(Decision.LOCK, best.lot_id, best_distance, runner_up_distance, None, field)
+
+
+def match_candidates(
+    recognized: DateKey | None,
+    candidates: list[Candidate],
+    *,
+    manufacture: DateKey | None = None,
+    max_distance: float = 1.5,
+    min_margin: float = 1.0,
+) -> MatchResult:
+    """Identify which lot the photographed box is, from the dates on it.
+
+    Two dates can name it, and 製造日 is tried first for two reasons: it is the
+    field FIFO now sorts on, and it is machine-printed by the supplier, whereas
+    the receipt date is a hand-applied rubber stamp — the single hardest thing
+    on the box to read (§6 R1). Preferring the printed field is preferring the
+    legible one.
+
+    Falling through to the receipt date is not just a backstop: when two lots
+    share a manufacture date the 製造日 pass is genuinely ambiguous, and the
+    receipt date is exactly what tells them apart.
+
+    Both passes still run against the closed candidate set of in-stock lots
+    (§2.2), so a misread lands on a real lot or on nothing — never on a date
+    that was never received.
+    """
+    if not candidates:
+        return MatchResult(Decision.DEFER, None, None, None, DeferReason.NO_CANDIDATES)
+    if recognized is None and manufacture is None:
+        return MatchResult(Decision.DEFER, None, None, None, DeferReason.NO_RECOGNITION)
+
+    attempts: list[MatchResult] = []
+    if manufacture is not None:
+        attempt = _match_on(manufacture, candidates, lambda c: c.manufacture_key,
+                            "manufacture_date", max_distance, min_margin)
+        if attempt.locked:
+            return attempt
+        attempts.append(attempt)
+
+    if recognized is not None:
+        attempt = _match_on(recognized, candidates, lambda c: c.key,
+                            "receipt_date", max_distance, min_margin)
+        if attempt.locked:
+            return attempt
+        attempts.append(attempt)
+
+    if not attempts:
+        return MatchResult(Decision.DEFER, None, None, None, DeferReason.NO_RECOGNITION)
+    # Report the near miss over the blank one: "nothing was close" is more
+    # actionable than "that field was empty on every lot".
+    ranked = sorted(attempts, key=lambda r: (r.reason is DeferReason.NO_CANDIDATES,
+                                             r.best_distance if r.best_distance is not None else 9e9))
+    return ranked[0]
 
 
 def _sort_key(candidate: Candidate) -> tuple:

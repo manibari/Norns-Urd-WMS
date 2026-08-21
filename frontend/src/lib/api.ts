@@ -141,6 +141,12 @@ export type Proposal = {
   decision: "lock" | "defer";
   defer_reason: string | null;
   match_distance: number | null;
+  /** 是哪個日期認出這一批的。manufacture_date（印的）比 receipt_date（手蓋章）可信 */
+  lot_matched_on: "manufacture_date" | "receipt_date" | null;
+  /** FIFO 現在該領哪一批。用來在拿錯時直接指出正確那箱 */
+  fifo_target_lot_id: number | null;
+  /** FIFO 依據哪個欄位排序。全部沒填製造日時會退回進貨日 */
+  fifo_basis: "製造日期" | "進貨日期";
   locked_lot: { lot_id: number; receipt_date: string; manufacture_date: string | null; qty_on_hand: number } | null;
   fifo_ok: boolean | null;
   fifo_expected_date: string | null;

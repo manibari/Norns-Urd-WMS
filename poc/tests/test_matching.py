@@ -119,3 +119,59 @@ class Fifo(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MatchOnManufactureDate(unittest.TestCase):
+    """製造日 identifies the lot too — and it is the printed field, not the stamp.
+
+    Real case that motivated this (2026-08-21, IMG off the line): the box read
+    章 2026-08-12 / 製造 2025年09月26日. The stamp matched no lot on file; the
+    printed manufacture date matched exactly. Matching on the stamp alone left
+    the operator picking the lot by hand on a box the system had already
+    identified.
+    """
+
+    STOCK = [
+        Candidate("13", "2026-06-09", "2025-09-26"),
+        Candidate("14", "2026-07-07", "2026-03-22"),
+    ]
+
+    def test_printed_manufacture_date_locks_when_the_stamp_matches_nothing(self):
+        result = match_candidates(to_date_key("2026-08-12"), self.STOCK,
+                                  manufacture=to_date_key("2025年09月26日"))
+        self.assertTrue(result.locked)
+        self.assertEqual(result.lot_id, "13")
+        self.assertEqual(result.matched_on, "manufacture_date")
+
+    def test_receipt_date_still_locks_when_no_manufacture_date_was_read(self):
+        result = match_candidates(to_date_key("2026-07-07"), self.STOCK)
+        self.assertTrue(result.locked)
+        self.assertEqual(result.lot_id, "14")
+        self.assertEqual(result.matched_on, "receipt_date")
+
+    def test_receipt_date_separates_two_lots_made_the_same_day(self):
+        # 製造日 cannot tell these apart, which is exactly what the stamp is for.
+        same_day = [Candidate("a", "2026-06-09", "2026-03-22"),
+                    Candidate("b", "2026-07-07", "2026-03-22")]
+        result = match_candidates(to_date_key("2026-07-07"), same_day,
+                                  manufacture=to_date_key("2026-03-22"))
+        self.assertTrue(result.locked)
+        self.assertEqual(result.lot_id, "b")
+        self.assertEqual(result.matched_on, "receipt_date")
+
+    def test_a_manufacture_date_matching_nothing_does_not_force_a_lock(self):
+        # The closed candidate set is the safety net: a date never received
+        # must defer, not snap to the nearest lot (§2.2).
+        result = match_candidates(None, self.STOCK, manufacture=to_date_key("2019-01-01"))
+        self.assertFalse(result.locked)
+        self.assertEqual(result.reason, DeferReason.NO_CANDIDATE_IN_RANGE)
+
+    def test_undated_lots_are_skipped_by_the_manufacture_pass_not_matched_blindly(self):
+        undated = [Candidate("x", "2026-06-09", None)]
+        result = match_candidates(None, undated, manufacture=to_date_key("2025-09-26"))
+        self.assertFalse(result.locked)
+
+    def test_reading_neither_date_defers(self):
+        result = match_candidates(None, self.STOCK)
+        self.assertFalse(result.locked)
+        self.assertEqual(result.reason, DeferReason.NO_RECOGNITION)
