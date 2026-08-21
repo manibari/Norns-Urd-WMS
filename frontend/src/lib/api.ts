@@ -16,7 +16,11 @@ export type Item = {
   unit: string;
   shelf_life_days: number | null;
   safety_stock: number;
+  /** 每箱米數。null = 此品項不用米數換算 */
+  meters_per_box: number | null;
   on_hand: number;
+  /** 在庫換算成米。meters_per_box 為 null 時也是 null */
+  on_hand_m: number | null;
   open_lots: number;
 };
 
@@ -92,10 +96,20 @@ export const api = {
   lots: (itemCode?: string) =>
     req<Lot[]>(`/api/lots${itemCode ? `?item_code=${encodeURIComponent(itemCode)}` : ""}`),
   createLot: (body: Record<string, unknown>) =>
-    req<{ id: number; receipt_date: string; created_item: boolean; same_day_lot_exists: boolean }>(
-      "/api/lots",
-      json(body),
-    ),
+    req<{
+      id: number;
+      receipt_date: string;
+      created_item: boolean;
+      same_day_lot_exists: boolean;
+      qty: number;
+      conversion_note: string | null;
+    }>("/api/lots", json(body)),
+  patchItem: (code: string, body: Record<string, unknown>) =>
+    req<Record<string, unknown>>(`/api/items/${encodeURIComponent(code)}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
   recognize: (itemCode: string, file: File) => {
     const form = new FormData();
     form.append("item_code", itemCode);

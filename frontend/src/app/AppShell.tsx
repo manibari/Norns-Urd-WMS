@@ -5,6 +5,7 @@ import {
   CameraOutlined,
   InboxOutlined,
   ProfileOutlined,
+  TableOutlined,
 } from "@ant-design/icons";
 import { ConfigProvider, Layout, Menu, Typography } from "antd";
 import zhTW from "antd/locale/zh_TW";
@@ -23,6 +24,8 @@ const NAV = [
   { key: "/issue", icon: <CameraOutlined />, label: <Link href="/issue">2. 領用登錄</Link> },
   { key: "/records", icon: <ProfileOutlined />, label: <Link href="/records">3. 紀錄與追溯</Link> },
   { key: "/alerts", icon: <AlertOutlined />, label: <Link href="/alerts">提醒</Link> },
+  // Master data, not a pipeline step — hence unnumbered and last.
+  { key: "/items", icon: <TableOutlined />, label: <Link href="/items">品項與米數</Link> },
 ];
 
 export default function AppShell({ children }: { children: React.ReactNode }) {

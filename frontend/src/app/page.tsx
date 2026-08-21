@@ -14,8 +14,8 @@
 
 import { ArrowRightOutlined, PlusOutlined } from "@ant-design/icons";
 import {
-  AutoComplete, Button, Card, Col, DatePicker, Divider, Empty, Form, Input,
-  InputNumber, Row, Table, Tag, Typography, message,
+  Alert, AutoComplete, Button, Card, Col, DatePicker, Divider, Empty, Form, Input,
+  InputNumber, Row, Segmented, Table, Tag, Typography, message,
 } from "antd";
 import dayjs from "dayjs";
 import Link from "next/link";
@@ -29,7 +29,17 @@ export default function ReceivingPage() {
   const [lots, setLots] = useState<Lot[]>([]);
   const [busy, setBusy] = useState(false);
   const [knownCode, setKnownCode] = useState(false);
+  const [qtyMode, setQtyMode] = useState<"箱" | "米">("箱");
   const [form] = Form.useForm();
+  const rate = Form.useWatch("meters_per_box", form) as number | undefined;
+  const metres = Form.useWatch("qty_meters", form) as number | undefined;
+
+  // Preview only — the server does the authoritative conversion. Shown live so
+  // the remainder is visible before submitting, not discovered afterwards.
+  const preview =
+    qtyMode === "米" && rate && rate > 0 && metres && metres > 0
+      ? { boxes: Math.floor(metres / rate), remainder: metres % rate }
+      : null;
 
   const load = useCallback(async () => {
     try {
@@ -52,6 +62,7 @@ export default function ReceivingPage() {
         spec: found.spec,
         shelf_life_days: found.shelf_life_days,
         safety_stock: found.safety_stock,
+        meters_per_box: found.meters_per_box,
       });
     }
   }
@@ -70,13 +81,13 @@ export default function ReceivingPage() {
         receipt_date: dayjs(values.receipt_date).format("YYYY-MM-DD"),
         manufacture_date: values.manufacture_date ? dayjs(values.manufacture_date).format("YYYY-MM-DD") : null,
         supplier_lot_code: values.supplier_lot_code || null,
-        qty: values.qty,
+        meters_per_box: values.meters_per_box ?? null,
+        ...(qtyMode === "米" ? { qty_meters: values.qty_meters } : { qty: values.qty }),
       });
       message.success(
-        res.created_item
-          ? `已新增品項並建立批次（進貨日 ${res.receipt_date}）`
-          : `已建立批次（進貨日 ${res.receipt_date}）`,
+        `${res.created_item ? "已新增品項並建立批次" : "已建立批次"}：${res.qty} 箱（進貨日 ${res.receipt_date}）`,
       );
+      if (res.conversion_note) message.warning(res.conversion_note, 8);
       if (res.same_day_lot_exists) {
         message.warning("同料號同進貨日已有另一批，這次另開一批。要合併請自行調整。", 6);
       }
@@ -156,8 +167,40 @@ export default function ReceivingPage() {
               </Form.Item>
             </Col>
             <Col xs={24} md={6}>
-              <Form.Item name="qty" label="數量（箱）" rules={[{ required: true }]}>
-                <InputNumber min={1} style={{ width: "100%" }} />
+              <Form.Item
+                label={
+                  <span>
+                    數量{" "}
+                    <Segmented
+                      size="small"
+                      value={qtyMode}
+                      onChange={(v) => setQtyMode(v as "箱" | "米")}
+                      options={["箱", "米"]}
+                      style={{ marginLeft: 8 }}
+                    />
+                  </span>
+                }
+                required
+                extra={
+                  qtyMode === "米"
+                    ? preview
+                      ? `= ${preview.boxes} 箱${preview.remainder ? `，剩 ${preview.remainder.toLocaleString()} 米對不上整箱` : ""}`
+                      : rate
+                        ? "輸入米數自動換算"
+                        : "此料號尚未設定每箱米數"
+                    : undefined
+                }
+                style={{ marginBottom: 0 }}
+              >
+                {qtyMode === "箱" ? (
+                  <Form.Item name="qty" rules={[{ required: true, message: "請填數量" }]} noStyle>
+                    <InputNumber min={1} style={{ width: "100%" }} addonAfter="箱" />
+                  </Form.Item>
+                ) : (
+                  <Form.Item name="qty_meters" rules={[{ required: true, message: "請填米數" }]} noStyle>
+                    <InputNumber min={1} step={100} style={{ width: "100%" }} addonAfter="米" />
+                  </Form.Item>
+                )}
               </Form.Item>
             </Col>
           </Row>
@@ -176,7 +219,24 @@ export default function ReceivingPage() {
                 <InputNumber min={0} style={{ width: "100%" }} />
               </Form.Item>
             </Col>
+            <Col xs={24} md={6}>
+              <Form.Item
+                name="meters_per_box"
+                label="每箱米數"
+                extra="設了才能用米數收貨；留空代表此品項只用箱計"
+              >
+                <InputNumber min={1} step={100} style={{ width: "100%" }} addonAfter="米" placeholder="例 900" />
+              </Form.Item>
+            </Col>
           </Row>
+          {qtyMode === "米" && !rate && (
+            <Alert
+              type="warning"
+              title="要用米數收貨，得先設定每箱米數"
+              description="就填在上面「每箱米數」，或到「品項與米數」統一維護。庫存單位仍然是箱 —— 一箱＝一捲，不做部分入庫。"
+              style={{ marginBottom: 16 }}
+            />
+          )}
 
           <Button type="primary" size="large" icon={<PlusOutlined />} loading={busy} onClick={submit}>
             建立批次

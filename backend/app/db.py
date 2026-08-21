@@ -28,7 +28,8 @@ CREATE TABLE IF NOT EXISTS inventory_item (
     spec             TEXT,
     unit             TEXT NOT NULL DEFAULT '箱',
     shelf_life_days  INTEGER,
-    safety_stock     INTEGER NOT NULL DEFAULT 0
+    safety_stock     INTEGER NOT NULL DEFAULT 0,
+    meters_per_box   INTEGER          -- 每箱米數. NULL = 此品項不用米數換算
 );
 
 CREATE TABLE IF NOT EXISTS inventory_lot (
@@ -99,11 +100,23 @@ def transaction():
         conn.close()
 
 
+# Columns added after the first release. SQLite has no IF NOT EXISTS for ADD
+# COLUMN, so each is applied only when absent — keeps an existing demo database
+# working instead of requiring a wipe.
+_ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
+    ("inventory_item", "meters_per_box", "meters_per_box INTEGER"),
+)
+
+
 def init_db() -> None:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = connect()
     try:
         conn.executescript(SCHEMA)
+        for table, column, ddl in _ADDED_COLUMNS:
+            present = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+            if column not in present:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
     finally:
         conn.close()
 

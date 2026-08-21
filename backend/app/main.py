@@ -24,6 +24,7 @@ sys.path.insert(0, str(ROOT / "core"))
 from urdwms_core.matching import Candidate, fifo_expected, match_candidates  # noqa: E402
 from urdwms_core.normalize import to_date_key  # noqa: E402
 from urdwms_core.recognition import GeminiProvider, Recognition  # noqa: E402
+from urdwms_core.units import boxes_from_meters, meters_from_boxes  # noqa: E402
 
 from .db import init_db, log, now, transaction  # noqa: E402
 
@@ -89,6 +90,10 @@ class LotIn(BaseModel):
     unit: str = "箱"
     shelf_life_days: int | None = None
     safety_stock: int = 0
+    meters_per_box: int | None = None
+    # Deliveries are sometimes counted in metres. When set, it is converted to
+    # whole boxes and `qty` is ignored — boxes remain the ledger unit (units.py).
+    qty_meters: int | None = None
 
 
 class ItemIn(BaseModel):
@@ -98,6 +103,15 @@ class ItemIn(BaseModel):
     unit: str = "箱"
     shelf_life_days: int | None = None
     safety_stock: int = 0
+    meters_per_box: int | None = None
+
+
+class ItemPatch(BaseModel):
+    name: str | None = None
+    spec: str | None = None
+    shelf_life_days: int | None = None
+    safety_stock: int | None = None
+    meters_per_box: int | None = None
 
 
 class ScanIn(BaseModel):
@@ -133,7 +147,24 @@ def items() -> list[dict]:
             " FROM inventory_item i LEFT JOIN inventory_lot l ON l.item_code = i.item_code"
             " GROUP BY i.item_code ORDER BY i.item_code",
         ).fetchall()
-    return [dict(r) for r in rows]
+    return [{**dict(r), "on_hand_m": meters_from_boxes(r["on_hand"], r["meters_per_box"])} for r in rows]
+
+
+@app.patch("/api/items/{item_code:path}")
+def update_item(item_code: str, payload: ItemPatch) -> dict:
+    """Edit the master record, including the metres-per-box rate."""
+    changes = {k: v for k, v in payload.model_dump().items() if v is not None}
+    if not changes:
+        raise HTTPException(400, "沒有要更新的欄位")
+    if "meters_per_box" in changes and changes["meters_per_box"] <= 0:
+        raise HTTPException(400, "每箱米數必須大於 0（不用米數換算請留空）")
+    with transaction() as conn:
+        if not conn.execute("SELECT 1 FROM inventory_item WHERE item_code = ?", (item_code,)).fetchone():
+            raise HTTPException(404, f"料號 {item_code} 不存在")
+        conn.execute(f"UPDATE inventory_item SET {', '.join(f'{k} = ?' for k in changes)}"
+                     " WHERE item_code = ?", (*changes.values(), item_code))
+        log(conn, DEMO_USER, "item.update", {"item_code": item_code, **changes})
+    return {"item_code": item_code, **changes}
 
 
 @app.post("/api/items")
@@ -142,10 +173,10 @@ def create_item(payload: ItemIn) -> dict:
         if conn.execute("SELECT 1 FROM inventory_item WHERE item_code = ?", (payload.item_code,)).fetchone():
             raise HTTPException(409, f"料號 {payload.item_code} 已存在")
         conn.execute(
-            "INSERT INTO inventory_item (item_code, name, spec, unit, shelf_life_days, safety_stock)"
-            " VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO inventory_item (item_code, name, spec, unit, shelf_life_days, safety_stock,"
+            " meters_per_box) VALUES (?, ?, ?, ?, ?, ?, ?)",
             (payload.item_code.strip(), payload.name.strip(), payload.spec, payload.unit,
-             payload.shelf_life_days, payload.safety_stock),
+             payload.shelf_life_days, payload.safety_stock, payload.meters_per_box),
         )
         log(conn, DEMO_USER, "item.create", {"item_code": payload.item_code})
     return {"item_code": payload.item_code}
@@ -183,7 +214,7 @@ def create_lot(payload: LotIn) -> dict:
         raise HTTPException(400, "進貨日格式無法辨識")
     if parsed.iso > date.today().isoformat():
         raise HTTPException(400, f"進貨日 {parsed.iso} 在未來，請確認是否打錯")
-    if payload.qty < 1:
+    if payload.qty_meters is None and payload.qty < 1:
         raise HTTPException(400, "數量至少 1 箱")
 
     manufacture = to_date_key(payload.manufacture_date) if payload.manufacture_date else None
@@ -198,10 +229,10 @@ def create_lot(payload: LotIn) -> dict:
             if not (payload.item_name or "").strip():
                 raise HTTPException(400, f"料號 {item_code} 不在主檔，請一併填品名以新增品項")
             conn.execute(
-                "INSERT INTO inventory_item (item_code, name, spec, unit, shelf_life_days, safety_stock)"
-                " VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT INTO inventory_item (item_code, name, spec, unit, shelf_life_days, safety_stock,"
+                " meters_per_box) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (item_code, payload.item_name.strip(), payload.spec, payload.unit,
-                 payload.shelf_life_days, payload.safety_stock),
+                 payload.shelf_life_days, payload.safety_stock, payload.meters_per_box),
             )
             created_item = True
             log(conn, DEMO_USER, "item.create", {"item_code": item_code, "name": payload.item_name})
@@ -212,6 +243,7 @@ def create_lot(payload: LotIn) -> dict:
             for column, value in (("name", (payload.item_name or "").strip() or None),
                                   ("spec", payload.spec),
                                   ("shelf_life_days", payload.shelf_life_days),
+                                  ("meters_per_box", payload.meters_per_box),
                                   ("safety_stock", payload.safety_stock or None)):
                 if value is not None:
                     updates.append(f"{column} = ?")
@@ -224,19 +256,42 @@ def create_lot(payload: LotIn) -> dict:
             "SELECT id, qty_on_hand FROM inventory_lot WHERE item_code = ? AND receipt_date = ?",
             (item_code, parsed.iso),
         ).fetchone()
+        qty = payload.qty
+        conversion = None
+        if payload.qty_meters is not None:
+            # The rate may have been supplied on this very request (new item), so
+            # read it back rather than trusting the payload alone.
+            rate = conn.execute("SELECT meters_per_box FROM inventory_item WHERE item_code = ?",
+                                (item_code,)).fetchone()["meters_per_box"]
+            conversion = boxes_from_meters(payload.qty_meters, rate)
+            if conversion is None:
+                raise HTTPException(400, f"料號 {item_code} 尚未設定每箱米數，無法用米數收貨")
+            if conversion.boxes < 1:
+                raise HTTPException(
+                    400,
+                    f"{payload.qty_meters:,} 米不足一箱（每箱 {rate:,} 米）。"
+                    " 庫存以箱為單位，不做部分入庫。",
+                )
+            qty = conversion.boxes
+
         cursor = conn.execute(
             "INSERT INTO inventory_lot (item_code, receipt_date, manufacture_date, supplier_lot_code,"
             " qty_on_hand, created_at, created_by) VALUES (?, ?, ?, ?, ?, ?, ?)",
             (item_code, parsed.iso, manufacture.iso if manufacture else None,
-             payload.supplier_lot_code, payload.qty, now(), DEMO_USER),
+             payload.supplier_lot_code, qty, now(), DEMO_USER),
         )
         lot_id = cursor.lastrowid
         log(conn, DEMO_USER, "lot.create",
-            {"lot_id": lot_id, "item_code": item_code, "receipt_date": parsed.iso, "qty": payload.qty})
+            {"lot_id": lot_id, "item_code": item_code, "receipt_date": parsed.iso, "qty": qty,
+             "entered_meters": payload.qty_meters})
     return {
         "id": lot_id,
         "receipt_date": parsed.iso,
         "created_item": created_item,
+        "qty": qty,
+        # Surfaced, never rounded away: metres that do not divide into whole
+        # boxes are a real discrepancy the warehouse should see (units.py).
+        "conversion_note": conversion.note if conversion else None,
         # Surfaced rather than auto-merged: whether two deliveries on one day are
         # one lot or two is the warehouse's call, not the system's (US-1).
         "same_day_lot_exists": bool(existing),

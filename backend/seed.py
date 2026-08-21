@@ -18,9 +18,10 @@ from app.db import init_db, log, now, transaction
 TODAY = date.today()
 
 ITEMS = [
-    # code, name, spec, shelf_life_days, safety_stock
-    ("2003.T7320BC-340X900-P1", "高阻氧食品包裝拉伸膜", "340mm x 900M", 540, 3),
-    ("2003.T6240BA-334X600", "食品包裝拉伸膜", "334mm x 600M", 540, 2),
+    # code, name, spec, shelf_life_days, safety_stock, meters_per_box
+    # Rates come off the real labels: `340mm x 900M`, `900M / 捲`.
+    ("2003.T7320BC-340X900-P1", "高阻氧食品包裝拉伸膜", "340mm x 900M", 540, 3, 900),
+    ("2003.T6240BA-334X600", "食品包裝拉伸膜", "334mm x 600M", 540, 2, 600),
 ]
 
 LOTS = [
@@ -39,10 +40,11 @@ def main() -> int:
         if existing:
             print(f"already seeded ({existing} lots) — nothing to do")
             return 0
-        for code, name, spec, shelf, safety in ITEMS:
+        for code, name, spec, shelf, safety, meters in ITEMS:
             conn.execute(
-                "INSERT OR IGNORE INTO inventory_item (item_code, name, spec, unit, shelf_life_days, safety_stock)"
-                " VALUES (?,?,?,'箱',?,?)", (code, name, spec, shelf, safety))
+                "INSERT OR IGNORE INTO inventory_item (item_code, name, spec, unit, shelf_life_days,"
+                " safety_stock, meters_per_box) VALUES (?,?,?,'箱',?,?,?)",
+                (code, name, spec, shelf, safety, meters))
         for code, receipt, manufacture, supplier, qty in LOTS:
             conn.execute(
                 "INSERT INTO inventory_lot (item_code, receipt_date, manufacture_date, supplier_lot_code,"

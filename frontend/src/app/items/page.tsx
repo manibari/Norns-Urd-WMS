@@ -1,0 +1,139 @@
+"use client";
+
+/**
+ * Item master — including the metres-per-box table.
+ *
+ * Suppliers label film by length and some deliveries are counted that way, so
+ * receiving needs a rate to convert with. Stock itself stays in boxes: one box
+ * is one roll, a draw deducts one, and there is no partial consumption
+ * (requirement Q6). Keeping stock in metres would make "half a roll left"
+ * representable and quietly undo that decision — so this table feeds conversion
+ * and display, not the ledger.
+ *
+ * An unset rate is a legitimate state, not missing data: plenty of items are
+ * only ever counted in boxes. Receiving refuses a metre entry for those rather
+ * than inventing a rate.
+ */
+
+import { Alert, Card, Empty, InputNumber, Table, Tag, Typography, message } from "antd";
+import { useCallback, useEffect, useState } from "react";
+import { api, type Item } from "@/lib/api";
+
+const { Title, Text } = Typography;
+
+export default function ItemsPage() {
+  const [items, setItems] = useState<Item[]>([]);
+  const [saving, setSaving] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      setItems(await api.items());
+    } catch (e) {
+      message.error((e as Error).message);
+    }
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  async function save(code: string, field: string, value: number | null) {
+    setSaving(code);
+    try {
+      await api.patchItem(code, { [field]: value });
+      message.success("已更新");
+      load();
+    } catch (e) {
+      message.error((e as Error).message);
+    } finally {
+      setSaving(null);
+    }
+  }
+
+  const unset = items.filter((i) => !i.meters_per_box).length;
+
+  return (
+    <>
+      <Title level={3} style={{ marginTop: 0 }}>品項與米數對照</Title>
+
+      <Alert
+        type="info"
+        title="米數是換算用的，庫存單位仍然是箱"
+        description="一箱＝一捲，領用一次扣一箱，不做部分扣量。設了每箱米數之後，收貨可以直接輸入米數，系統換算成整箱；除不盡的餘數會明白告訴你，不會四捨五入吃掉。"
+        style={{ marginBottom: 24 }}
+      />
+
+      <Card
+        title="對照表"
+        extra={unset > 0 ? <Text type="secondary">{unset} 項未設定米數（僅能用箱收貨）</Text> : null}
+      >
+        <Table
+          rowKey="item_code"
+          dataSource={items}
+          pagination={false}
+          size="middle"
+          loading={Boolean(saving)}
+          locale={{ emptyText: <Empty description="尚無品項，請先去收貨建批" image={Empty.PRESENTED_IMAGE_SIMPLE} /> }}
+          columns={[
+            { title: "料號", dataIndex: "item_code" },
+            { title: "品名", dataIndex: "name" },
+            { title: "規格", dataIndex: "spec", render: (v) => v ?? "—" },
+            {
+              title: "每箱米數",
+              dataIndex: "meters_per_box",
+              width: 200,
+              render: (v: number | null, row: Item) => (
+                <InputNumber
+                  min={1}
+                  value={v ?? undefined}
+                  placeholder="未設定"
+                  addonAfter="米"
+                  style={{ width: 160 }}
+                  onBlur={(e) => {
+                    const next = e.target.value ? Number(e.target.value) : null;
+                    if (next !== v && next && next > 0) save(row.item_code, "meters_per_box", next);
+                  }}
+                />
+              ),
+            },
+            {
+              title: "在庫",
+              dataIndex: "on_hand",
+              align: "right" as const,
+              render: (v: number, row: Item) => (
+                <span>
+                  {v} 箱
+                  {row.on_hand_m != null && (
+                    <Text type="secondary">（{row.on_hand_m.toLocaleString()} 米）</Text>
+                  )}
+                </span>
+              ),
+            },
+            {
+              title: "保存期限",
+              dataIndex: "shelf_life_days",
+              align: "right" as const,
+              render: (v: number | null, row: Item) => (
+                <InputNumber
+                  min={1}
+                  value={v ?? undefined}
+                  placeholder="不提醒"
+                  addonAfter="天"
+                  style={{ width: 140 }}
+                  onBlur={(e) => {
+                    const next = e.target.value ? Number(e.target.value) : null;
+                    if (next !== v && next && next > 0) save(row.item_code, "shelf_life_days", next);
+                  }}
+                />
+              ),
+            },
+            {
+              title: "安全水位",
+              dataIndex: "safety_stock",
+              align: "right" as const,
+              render: (v: number) => (v > 0 ? <Tag color="blue">{v} 箱</Tag> : <Text type="secondary">未設</Text>),
+            },
+          ]}
+        />
+      </Card>
+    </>
+  );
+}
