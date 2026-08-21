@@ -18,6 +18,7 @@ import { Button, Card, Col, Empty, Row, Space, Statistic, Table, Tag, Tooltip, T
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import { useAuth } from "@/components/AuthGate";
+import ExpiryCell from "@/components/ExpiryCell";
 import { useColumnWidths } from "@/components/resizable";
 import { api, type Alerts, type Item, type Lot } from "@/lib/api";
 
@@ -131,7 +132,13 @@ export default function StockPage() {
                       ),
                     },
                     { title: "製造日", dataIndex: "manufacture_date", render: (v) => v ?? "—" },
-                    { title: "有效日", dataIndex: "expiry_date", render: (v) => v ?? "—" },
+                    {
+                      title: "有效期限", dataIndex: "effective_expiry",
+                      render: (_, row: Lot) => (
+                        <ExpiryCell date={row.effective_expiry} daysLeft={row.days_left}
+                                    required={row.item_has_expiry === 1} />
+                      ),
+                    },
                     { title: "廠商", dataIndex: "supplier", render: (v) => v ?? "—" },
                     {
                       title: "判定", dataIndex: "verdict",

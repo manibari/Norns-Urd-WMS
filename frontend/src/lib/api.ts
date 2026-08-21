@@ -13,7 +13,14 @@ export type Lot = {
   /** 驗收單上填的數量原值，保留供稽核比對 */
   entered_meters: number | null;
   entered_unit: string | null;
+  /** 標示（有效日期）—— 包材上印的，多數沒有 */
   expiry_date: string | null;
+  /** 有效期限（＝收貨時填的那個日期） */
+  effective_expiry: string | null;
+  /** 這個品項有沒有效期。有的話這批沒填就是漏填 */
+  item_has_expiry: number;
+  /** 距離到期還幾天。負數＝已過期 */
+  days_left: number | null;
   inspection: Record<string, boolean | null>;
   /** 這批被領用過幾次。>0 就不能刪，刪掉會讓領用紀錄指向不存在的批次 */
   draw_count: number;
@@ -48,6 +55,7 @@ export type Item = {
   recognisable: boolean;
   spec: string | null;
   unit: string;
+  /** @deprecated 效期改成收貨時直接填有效期限，不再由天數推算 */
   shelf_life_days: number | null;
   safety_stock: number;
   /** 每箱米數。null = 此品項不用米數換算 */
@@ -55,7 +63,7 @@ export type Item = {
   meters_per_box: number | null;
   /** 計量單位（米／張／包…）。隨品項而定 */
   pack_unit: string | null;
-  /** 這個品項有沒有保存期限。有的話收貨必須留下到期依據 */
+  /** 這個品項有沒有效期。有的話收貨必須填有效期限 */
   has_expiry: number;
   rejected_qty: number;
   /** 最近一次進貨日／建批時間，庫存總覽用來把最新的排在最上面 */

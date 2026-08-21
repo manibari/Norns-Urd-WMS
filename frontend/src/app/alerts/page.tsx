@@ -53,7 +53,7 @@ export default function AlertsPage() {
           最後檢查 {data.checked_at.slice(0, 19).replace("T", " ")}
           ｜門檻：效期 {data.thresholds.expiry_days} 天內、呆滯 {data.thresholds.stale_days} 天、
           明細待補 {data.thresholds.pending_hours} 小時
-          ｜到期日以包材標示為準，沒標示才用製造日＋保存期限推算
+          ｜有效期限就是收貨時填的那個日期，不做推算
         </Text>
       </Card>
 
@@ -90,15 +90,7 @@ export default function AlertsPage() {
             { title: "原物料名稱", dataIndex: "name", align: "center" as const },
             { title: "進貨日", dataIndex: "receipt_date", align: "center" as const },
             { title: "製造日", dataIndex: "manufacture_date", align: "center" as const },
-            {
-              title: "到期日",
-              dataIndex: "expires_on",
-              render: (v: string, row: { expiry_source?: string }) => (
-                <span>
-                  {v} <Tag color={row.expiry_source === "標示" ? "blue" : "default"}>{row.expiry_source}</Tag>
-                </span>
-              ),
-            },
+            { title: "有效期限", dataIndex: "expires_on", align: "center" as const },
             {
               title: "剩餘",
               dataIndex: "days_left",

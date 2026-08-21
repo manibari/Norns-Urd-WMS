@@ -145,7 +145,7 @@ export default function BasicsPage() {
           dataSource={items}
           pagination={false}
           size="middle"
-          scroll={{ x: 1420 }}
+          scroll={{ x: 1360 }}
           locale={{ emptyText: <Empty description="尚無品項" image={Empty.PRESENTED_IMAGE_SIMPLE} /> }}
           columns={itemCols.resizable([
             {
@@ -237,9 +237,10 @@ export default function BasicsPage() {
             {
               // Whether an item expires at all is a property of the item (the
               // form's note 1: 肉乾真空膜 needs no expiry date, 肉鬆 does). Saying
-              // "yes" then makes receiving insist on something to expire from,
-              // rather than letting the alert quietly never fire.
-              title: "效期", dataIndex: "has_expiry", width: 190,
+              // "yes" makes receiving insist on an actual 有效期限 — not a day
+              // count to infer one from, because an inferred date is a date
+              // nobody wrote down and nobody can check against the box.
+              title: "有效期", dataIndex: "has_expiry", width: 130,
               render: (v: number, row: Item) => (
                 <Space size={4}>
                   <Switch
@@ -247,20 +248,11 @@ export default function BasicsPage() {
                     checked={Boolean(v)}
                     onChange={(next) => patchField(row, "has_expiry", next)}
                   />
-                  {v ? (
-                    <Space size={4}>
-                      <Text type="secondary" style={{ fontSize: 12 }}>有</Text>
-                      <NumberCell
-                        value={row.shelf_life_days} min={1} placeholder="天數"
-                        onSave={(next) => patchField(row, "shelf_life_days", next)}
-                      />
-                      <Text type="secondary" style={{ fontSize: 12 }}>天</Text>
-                    </Space>
-                  ) : (
-                    <Tooltip title="收貨不會要求有效日期，也不發效期提醒">
-                      <Text type="secondary" style={{ fontSize: 12 }}>無</Text>
-                    </Tooltip>
-                  )}
+                  <Tooltip title={v
+                    ? "收貨時必須填有效期限"
+                    : "收貨不會要求有效期限，也不發效期提醒"}>
+                    <Text type="secondary" style={{ fontSize: 12 }}>{v ? "有" : "無"}</Text>
+                  </Tooltip>
                 </Space>
               ),
             },

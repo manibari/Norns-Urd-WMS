@@ -148,6 +148,8 @@ class ItemPatch(BaseModel):
     name: str | None = None
     model: str | None = None
     spec: str | None = None
+    # shelf_life_days is retained on the row for history but is no longer used:
+    # expiry is the date recorded at receiving, not one counted from a duration.
     shelf_life_days: int | None = None
     safety_stock: int | None = None
     meters_per_box: int | None = None
@@ -642,7 +644,8 @@ def delete_item(item_id: int, user: dict = Depends(requires("item.manage"))) -> 
 @app.get("/api/lots")
 def lots(item_id: int | None = None, user: dict = Depends(current_user)) -> list[dict]:
     with transaction() as conn:
-        sql = ("SELECT l.*, i.name AS item_name, i.model AS item_model, i.spec AS item_spec"
+        sql = ("SELECT l.*, i.name AS item_name, i.model AS item_model, i.spec AS item_spec,"
+               " i.has_expiry AS item_has_expiry, i.shelf_life_days AS item_shelf_life_days"
                " FROM inventory_lot l JOIN inventory_item i ON i.id = l.item_id")
         params: tuple = ()
         if item_id:
@@ -673,6 +676,15 @@ def lots(item_id: int | None = None, user: dict = Depends(current_user)) -> list
             "已領完" if row["qty_on_hand"] <= 0
             else "領貨中" if row["qty_on_hand"] < received
             else "未動用"
+        )
+        # The expiry is the date recorded at receiving, full stop. Inferring it
+        # from a shelf life would produce a date nobody wrote down and nobody
+        # can check against the box — and the acceptance form has a 有效日期
+        # column precisely because that is where the real answer comes from.
+        row["effective_expiry"] = row["expiry_date"]
+        row["days_left"] = (
+            (date.fromisoformat(row["expiry_date"]) - date.today()).days
+            if row["expiry_date"] else None
         )
     return rows
 
@@ -837,18 +849,11 @@ def create_lot(payload: LotIn, user: dict = Depends(requires("lot.create"))) -> 
         # pins down when it expires — the printed 有效日期, or a 製造日期 the
         # shelf-life days can be counted from. Without either, the expiry alert
         # has nothing to work with and would quietly never fire for this lot.
-        item_row = conn.execute("SELECT name, model, has_expiry, shelf_life_days"
-                                " FROM inventory_item WHERE id = ?", (item_id,)).fetchone()
-        if item_row and item_row["has_expiry"]:
-            has_printed = expiry is not None and expiry.iso
-            can_infer = manufacture is not None and manufacture.iso and item_row["shelf_life_days"]
-            if not (has_printed or can_infer):
-                label = item_row["model"] or item_row["name"]
-                raise HTTPException(
-                    400,
-                    f"{label} 有保存期限，請填「標示（有效日期）」；"
-                    " 或填製造日期並在基本資料設好保存天數，讓系統推算。",
-                )
+        item_row = conn.execute("SELECT name, model, has_expiry FROM inventory_item WHERE id = ?",
+                                (item_id,)).fetchone()
+        if item_row and item_row["has_expiry"] and not (expiry and expiry.iso):
+            label = item_row["model"] or item_row["name"]
+            raise HTTPException(400, f"{label} 有效期，請填「有效期限」。")
 
         qty = payload.qty
         conversion = None
@@ -1248,21 +1253,13 @@ def alerts(user: dict = Depends(current_user)) -> dict:
             " WHERE l.qty_on_hand > 0 AND COALESCE(l.verdict, '合格') <> '不合格'"
         ).fetchall():
             lot = dict(row)
-            # The acceptance form has a 標示(有效日期) column. When the supplier
-            # printed a date, use it — an inferred date is a fallback for the
-            # (common) case where the label carries no expiry at all.
-            expires = None
-            source = None
+            # Only the date someone actually recorded. An alert fired off an
+            # inferred date would be an alert about a number the system made up.
             if lot["expiry_date"]:
-                expires, source = date.fromisoformat(lot["expiry_date"]), "標示"
-            elif lot["shelf_life_days"] and lot["manufacture_date"]:
-                expires = date.fromisoformat(lot["manufacture_date"]) + timedelta(days=lot["shelf_life_days"])
-                source = "推算"
-            if expires:
-                remaining = (expires - today).days
+                remaining = (date.fromisoformat(lot["expiry_date"]) - today).days
                 if remaining <= expiry_days:
-                    out["expiring"].append({**lot, "expires_on": expires.isoformat(),
-                                            "days_left": remaining, "expiry_source": source})
+                    out["expiring"].append({**lot, "expires_on": lot["expiry_date"],
+                                            "days_left": remaining})
             age = (today - date.fromisoformat(lot["receipt_date"])).days
             if age >= stale_days:
                 out["stale"].append({**lot, "age_days": age})

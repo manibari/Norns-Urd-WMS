@@ -27,6 +27,7 @@ import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import { useAuth } from "@/components/AuthGate";
 import CreatableSelect from "@/components/CreatableSelect";
+import ExpiryCell from "@/components/ExpiryCell";
 import { useColumnWidths } from "@/components/resizable";
 import { api, type Dictionary, type Item, type Lot } from "@/lib/api";
 
@@ -71,7 +72,6 @@ export default function ReceivingPage() {
   const rate = (Form.useWatch("meters_per_box", form) as number | undefined) ?? picked?.meters_per_box;
   const packUnit = (Form.useWatch("pack_unit", form) as string | undefined) ?? picked?.pack_unit ?? "";
   const entered = Form.useWatch("qty_meters", form) as number | undefined;
-  const manufactureDate = Form.useWatch("manufacture_date", form);
   const confirmedBy = (Form.useWatch("confirmed_by", form) as string | undefined)?.trim();
   const sameSigner = Boolean(confirmedBy && confirmedBy === user?.name);
   const needsExpiry = Boolean(picked?.has_expiry);
@@ -388,15 +388,11 @@ export default function ReceivingPage() {
               </Col>
               <Col xs={24} md={8}>
                 <Form.Item
-                  name="expiry_date" label="有效日期"
-                  required={needsExpiry && !manufactureDate}
-                  extra={
-                    needsExpiry
-                      ? picked?.shelf_life_days
-                        ? `此品項有保存期限：填有效日期，或填製造日期讓系統以 ${picked.shelf_life_days} 天推算`
-                        : "此品項有保存期限，必須填有效日期"
-                      : "多數包材沒標，留空是正常的"
-                  }
+                  name="expiry_date" label="有效期限"
+                  rules={[{ required: needsExpiry, message: "此品項有效期，必須填有效期限" }]}
+                  extra={needsExpiry
+                    ? "這個品項有效期，必須填"
+                    : "此品項未標記有效期，留空是正常的"}
                 >
                   <DatePicker style={{ width: "100%" }} />
                 </Form.Item>
@@ -492,7 +488,7 @@ export default function ReceivingPage() {
           dataSource={lots}
           pagination={false}
           size="middle"
-          scroll={{ x: 1330 }}
+          scroll={{ x: 1440 }}
           locale={{ emptyText: <Empty description="尚無批次" image={Empty.PRESENTED_IMAGE_SIMPLE} /> }}
           // Depleted lots stay listed (they are history) but recede, so the
           // rows that can still be drawn from are the ones the eye lands on.
@@ -525,7 +521,13 @@ export default function ReceivingPage() {
                     : <Tag color="default">未動用</Tag>,
             },
             { title: "製造日", dataIndex: "manufacture_date", width: 110, render: (v) => v ?? "—" },
-            { title: "有效日", dataIndex: "expiry_date", width: 105, render: (v) => v ?? "—" },
+            {
+              title: "有效期限", dataIndex: "effective_expiry", width: 230,
+              render: (_, row: Lot) => (
+                <ExpiryCell date={row.effective_expiry} daysLeft={row.days_left}
+                            required={row.item_has_expiry === 1} />
+              ),
+            },
             {
               title: "判定", dataIndex: "verdict", width: 90,
               render: (v: string | null) =>

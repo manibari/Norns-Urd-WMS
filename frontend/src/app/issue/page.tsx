@@ -278,7 +278,12 @@ function IssueScreen() {
                     <Space wrap>
                       <span style={{ fontSize: 18 }}>進貨 {lot.receipt_date}</span>
                       <span style={{ fontSize: 18 }}>製造 {lot.manufacture_date ?? "—"}</span>
-                      {lot.expiry_date && <Text type="secondary">有效 {lot.expiry_date}</Text>}
+                      {lot.effective_expiry && (
+                        <Text type={lot.days_left != null && lot.days_left <= 90 ? "danger" : "secondary"}>
+                          有效 {lot.effective_expiry}
+                          {lot.days_left != null && `（剩 ${lot.days_left} 天）`}
+                        </Text>
+                      )}
                       <Text type="secondary">在庫 {lot.qty_on_hand} 箱</Text>
                       {lot.is_fifo_next && <Tag color="green">FIFO 應領</Tag>}
                     </Space>
