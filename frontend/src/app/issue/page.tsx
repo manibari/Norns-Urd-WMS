@@ -454,7 +454,11 @@ function IssueScreen() {
       )}
 
       {stage !== "拍照" && itemId && lots.length === 0 && (
-        <Card title="還不能領用" style={{ marginTop: 24 }}>
+        // 能不能領要用顏色講，不能只靠字 —— 這是站著、隔幾步、可能逆光在看的
+        <Card
+          title={<span style={{ color: BAD, fontWeight: 700 }}>還不能領用</span>}
+          style={{ marginTop: 24, borderColor: BAD }}
+        >
           <Empty
             image={Empty.PRESENTED_IMAGE_SIMPLE}
             description={`${selected?.label ?? "此品項"} 沒有可領用的在庫批次`}
@@ -472,7 +476,17 @@ function IssueScreen() {
               only appears when a human has to make the call — either they came
               in manually, or the stamp could not be read. */}
           {(stage === "手動" || !capture?.locked_lot) && (
-            <Card title="選批次（先進先出看製造日）" style={{ marginTop: 24 }}>
+            <Card
+              title={
+                <Space size={10}>
+                  <span style={{ color: OK, fontWeight: 700 }}>可以領用</span>
+                  <Text type="secondary" style={{ fontWeight: 400 }}>
+                    選批次（先進先出看製造日）
+                  </Text>
+                </Space>
+              }
+              style={{ marginTop: 24, borderColor: OK }}
+            >
               <Radio.Group
                 value={lotId}
                 onChange={(e) => setLotId(e.target.value)}
