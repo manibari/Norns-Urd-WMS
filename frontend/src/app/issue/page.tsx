@@ -25,10 +25,12 @@
  * changes nothing (requirement section 2.1).
  */
 
-import { CameraOutlined, InboxOutlined, ReloadOutlined } from "@ant-design/icons";
+import {
+  CameraOutlined, InboxOutlined, ReloadOutlined, UnorderedListOutlined,
+} from "@ant-design/icons";
 import {
   Alert, Button, Card, Col, Collapse, Empty, Form, Input, InputNumber, Radio,
-  Row, Select, Space, Spin, Tag, Tooltip, Typography, message,
+  Row, Segmented, Select, Space, Spin, Tag, Tooltip, Typography, message,
 } from "antd";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
@@ -62,6 +64,11 @@ function IssueScreen() {
   const [qty, setQty] = useState(1);
   const [busy, setBusy] = useState(false);
   const [scanning, setScanning] = useState(false);
+  // An explicit choice rather than a button in the corner: recognition and
+  // manual entry are two ways of doing the same job, and which one is in play
+  // changes what the screen is asking for. A small button made it look like an
+  // extra, so nobody would reach for it — or would not know it existed.
+  const [mode, setMode] = useState<"手動選擇" | "影像辨識">("手動選擇");
   const [capture, setCapture] = useState<Proposal | null>(null);
   const [verdict, setVerdict] = useState<Verdict>(null);
   const [form] = Form.useForm();
@@ -131,10 +138,14 @@ function IssueScreen() {
             : `辨識到 ${result.item_label}，但讀不出進貨日，請自己挑批次`,
         );
       } else {
-        message.warning("辨識不出是哪個品項，請自己選");
+        // Falling back rather than leaving them on a screen that cannot proceed:
+        // requirement section 2.3 — recognition may fail, the system may not.
+        setMode("手動選擇");
+        message.warning("辨識不出是哪個品項，已切回手動選擇");
       }
     } catch (e) {
-      message.error((e as Error).message);
+      setMode("手動選擇");
+      message.error(`${(e as Error).message}　已切回手動選擇`);
     } finally {
       setScanning(false);
       if (fileRef.current) fileRef.current.value = "";
@@ -184,47 +195,72 @@ function IssueScreen() {
       <Card
         title="1. 選品項"
         extra={
+          <Segmented
+            value={mode}
+            onChange={(v) => {
+              setMode(v as "手動選擇" | "影像辨識");
+              setCapture(null);
+            }}
+            options={[
+              { value: "手動選擇", label: <Space size={4}><UnorderedListOutlined />手動選擇</Space> },
+              { value: "影像辨識", label: <Space size={4}><CameraOutlined />影像辨識</Space> },
+            ]}
+          />
+        }
+      >
+        <input
+          ref={fileRef}
+          type="file"
+          accept="image/*"
+          capture="environment"
+          style={{ display: "none" }}
+          onChange={(e) => e.target.files?.[0] && onCapture(e.target.files[0])}
+        />
+
+        {mode === "影像辨識" ? (
           <>
-            <input
-              ref={fileRef}
-              type="file"
-              accept="image/*"
-              capture="environment"
-              style={{ display: "none" }}
-              onChange={(e) => e.target.files?.[0] && onCapture(e.target.files[0])}
-            />
             <Button
+              type="primary"
+              size="large"
               icon={<CameraOutlined />}
               loading={scanning}
               onClick={() => fileRef.current?.click()}
+              style={{ height: TOUCH, fontSize: 20, width: "100%" }}
             >
-              拍照帶入
+              {capture ? "重拍" : "拍照或選擇照片"}
             </Button>
+            <Text type="secondary" style={{ display: "block", marginTop: 12 }}>
+              對準側面的標籤和紅色驗收章。認得出就自動帶入品項與批次；
+              認不出會切回手動，不會卡住你。
+            </Text>
           </>
-        }
-      >
-        <Select
-          size="large"
-          style={{ width: "100%", height: TOUCH }}
-          value={itemId}
-          onChange={(v) => { setItemId(v); setCapture(null); }}
-          showSearch
-          optionFilterProp="label"
-          placeholder="選要領用的品項"
-          options={items.map((i) => ({
-            value: i.id,
-            label: `${i.label}｜${i.name}${i.spec ? ` ${i.spec}` : ""}（在庫 ${i.on_hand} 箱）`,
-            disabled: i.on_hand === 0,
-          }))}
-        />
-        <Text type="secondary" style={{ display: "block", marginTop: 12 }}>
-          在庫 0 的品項不能選。「拍照帶入」是輔助 —— 認得出就自動選好品項與批次，認不出照樣手動選。
-        </Text>
+        ) : (
+          <>
+            <Select
+              size="large"
+              style={{ width: "100%", height: TOUCH }}
+              value={itemId}
+              onChange={(v) => { setItemId(v); setCapture(null); }}
+              showSearch
+              optionFilterProp="label"
+              placeholder="選要領用的品項"
+              options={items.map((i) => ({
+                value: i.id,
+                label: `${i.label}｜${i.name}${i.spec ? ` ${i.spec}` : ""}（在庫 ${i.on_hand} 箱）`,
+                disabled: i.on_hand === 0,
+              }))}
+            />
+            <Text type="secondary" style={{ display: "block", marginTop: 12 }}>
+              在庫 0 的品項不能選。
+            </Text>
+          </>
+        )}
+
         {capture && (
           <Alert
             style={{ marginTop: 16 }}
             type={capture.item_id ? "info" : "warning"}
-            title={capture.item_id ? "已由照片帶入" : "照片認不出品項"}
+            title={capture.item_id ? `已由照片帶入：${capture.item_label}` : "照片認不出品項，已切回手動"}
             description={
               <Space orientation="vertical" size={2}>
                 <span>
@@ -239,6 +275,21 @@ function IssueScreen() {
             }
             action={<Button size="small" icon={<ReloadOutlined />} onClick={reset}>清除</Button>}
           />
+        )}
+
+        {mode === "影像辨識" && itemId && (
+          <div style={{ marginTop: 16 }}>
+            {/* Only claim recognition when a photo actually produced this. An
+                item carried over from a manual pick is not something the camera
+                found, and saying so would make the screen untrustworthy on the
+                one thing it most needs to be honest about. */}
+            <Text type="secondary">
+              {capture?.item_id === itemId ? "照片辨識到：" : "目前選定（手動）："}
+            </Text>{" "}
+            <Text strong style={{ fontSize: 18 }}>{selected?.label}</Text>{" "}
+            <Text>{selected?.name}</Text>{" "}
+            <Button size="small" type="link" onClick={() => setMode("手動選擇")}>換一個</Button>
+          </div>
         )}
       </Card>
 
