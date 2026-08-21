@@ -10,3 +10,4 @@ backend/uploads/
 frontend/.next/
 frontend/node_modules/
 next-env.d.ts
+frontend/tsconfig.tsbuildinfo

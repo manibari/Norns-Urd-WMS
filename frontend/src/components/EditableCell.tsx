@@ -63,7 +63,10 @@ export function NumberCell({
       step={step}
       variant="borderless"
       style={{ width: "100%" }}
-      formatter={suffix ? (v) => (v === undefined || v === "" ? "" : `${v} ${suffix}`) : undefined}
+      // antd v6 把 formatter 的參數收窄成 number | undefined，直接比 "" 過不了型別
+      // 檢查（dev 不檢查，所以只有 pnpm build 會爆）。轉成字串再比，空字串和
+      // undefined 一樣要回空白，不能顯示成「undefined 米」。
+      formatter={suffix ? (v) => (v === undefined || String(v) === "" ? "" : `${v} ${suffix}`) : undefined}
       parser={suffix ? ((v) => (v ?? "").replace(` ${suffix}`, "") as unknown as number) : undefined}
       onBlur={async (e) => {
         const raw = e.target.value.replace(suffix ? ` ${suffix}` : "", "").replace(/,/g, "").trim();
