@@ -1,7 +1,15 @@
 "use client";
 
 /**
- * Receiving — where a lot first exists.
+ * Receiving — mirrors the paper acceptance form (包材驗收單).
+ *
+ * Field order follows the form: 進貨日期 / 廠商名稱 / 原物料名稱 / 型號 / 數量(米).
+ * Someone is transcribing a sheet of paper; reordering the fields costs them
+ * their place on it every single line.
+ *
+ * 型號 (T6050BSW) is what they write and what the metres table is keyed on. The
+ * long code on the box (2003.T7320BC-340X900-P1) is master data they never
+ * type — it exists so recognition can map a label back to a 型號.
  *
  * This screen is the whole reason Urd-WMS can run without an ERP: the FIFO sort
  * key (receipt_date) is entered here, by the person holding the box, at the
@@ -29,10 +37,13 @@ export default function ReceivingPage() {
   const [lots, setLots] = useState<Lot[]>([]);
   const [busy, setBusy] = useState(false);
   const [knownCode, setKnownCode] = useState(false);
-  const [qtyMode, setQtyMode] = useState<"箱" | "米">("箱");
+  // Metres is the default: the acceptance form records quantity in metres, so
+  // boxes is the exception here, not the norm.
+  const [qtyMode, setQtyMode] = useState<"米" | "箱">("米");
   const [form] = Form.useForm();
   const rate = Form.useWatch("meters_per_box", form) as number | undefined;
   const metres = Form.useWatch("qty_meters", form) as number | undefined;
+  const chosenCode = (Form.useWatch("item_code", form) as string | undefined)?.trim();
 
   // Preview only — the server does the authoritative conversion. Shown live so
   // the remainder is visible before submitting, not discovered afterwards.
@@ -53,6 +64,12 @@ export default function ReceivingPage() {
 
   useEffect(() => { load(); }, [load]);
 
+  // Suggestions rather than a supplier master: one factory, a handful of names.
+  // A second real factory is what would justify the extra table.
+  const suppliers = Array.from(
+    new Set([...items.map((i) => i.supplier), ...lots.map((l) => l.supplier)].filter(Boolean) as string[]),
+  );
+
   function onCodeChange(value: string) {
     const found = items.find((i) => i.item_code === value.trim());
     setKnownCode(Boolean(found));
@@ -63,6 +80,8 @@ export default function ReceivingPage() {
         shelf_life_days: found.shelf_life_days,
         safety_stock: found.safety_stock,
         meters_per_box: found.meters_per_box,
+        supplier_code: found.supplier_code,
+        supplier: found.supplier ?? form.getFieldValue("supplier"),
       });
     }
   }
@@ -80,7 +99,9 @@ export default function ReceivingPage() {
         safety_stock: values.safety_stock ?? 0,
         receipt_date: dayjs(values.receipt_date).format("YYYY-MM-DD"),
         manufacture_date: values.manufacture_date ? dayjs(values.manufacture_date).format("YYYY-MM-DD") : null,
+        supplier: values.supplier || null,
         supplier_lot_code: values.supplier_lot_code || null,
+        supplier_code: values.supplier_code || null,
         meters_per_box: values.meters_per_box ?? null,
         ...(qtyMode === "米" ? { qty_meters: values.qty_meters } : { qty: values.qty }),
       });
@@ -112,60 +133,56 @@ export default function ReceivingPage() {
           initialValues={{ qty: 1, receipt_date: dayjs(), safety_stock: 0 }}
         >
           <Row gutter={24}>
-            <Col xs={24} md={8}>
-              <Form.Item
-                name="item_code"
-                label="料號"
-                rules={[{ required: true, message: "請填料號" }]}
-                extra="可直接打新料號，系統會一併建品項"
-              >
-                <AutoComplete
-                  options={items.map((i) => ({ value: i.item_code, label: `${i.item_code}｜${i.name}` }))}
-                  filterOption={(input, option) =>
-                    String(option?.value ?? "").toLowerCase().includes(input.toLowerCase())
-                  }
-                  onChange={onCodeChange}
-                  placeholder="例 2003.T7320BC-340X900-P1"
-                />
-              </Form.Item>
-            </Col>
-            <Col xs={24} md={8}>
-              <Form.Item
-                name="item_name"
-                label="品名"
-                rules={[{ required: !knownCode, message: "新料號請填品名" }]}
-              >
-                <Input placeholder="例 高阻氧食品包裝拉伸膜" />
-              </Form.Item>
-            </Col>
-            <Col xs={24} md={8}>
-              <Form.Item name="spec" label="規格">
-                <Input placeholder="例 340mm x 900M" />
-              </Form.Item>
-            </Col>
-          </Row>
-
-          <Row gutter={24}>
             <Col xs={24} md={6}>
               <Form.Item
                 name="receipt_date"
-                label="進貨日（驗收章）"
-                rules={[{ required: true, message: "請填進貨日" }]}
+                label="進貨日期"
+                rules={[{ required: true, message: "請填進貨日期" }]}
                 extra="FIFO 就是照這個排序"
               >
                 <DatePicker style={{ width: "100%" }} disabledDate={(d) => d.isAfter(dayjs(), "day")} />
               </Form.Item>
             </Col>
             <Col xs={24} md={6}>
-              <Form.Item name="manufacture_date" label="製造日（標籤）">
-                <DatePicker style={{ width: "100%" }} />
+              <Form.Item name="supplier" label="廠商名稱">
+                <AutoComplete
+                  options={suppliers.map((v) => ({ value: v }))}
+                  placeholder="例 臺灣希悅爾"
+                />
               </Form.Item>
             </Col>
             <Col xs={24} md={6}>
-              <Form.Item name="supplier_lot_code" label="原廠批號 ROLL#">
-                <Input placeholder="例 20250915-3081*61" />
+              <Form.Item
+                name="item_name"
+                label="原物料名稱"
+                rules={[{ required: !knownCode, message: "新型號請填原物料名稱" }]}
+              >
+                <Input placeholder="例 高阻氧食品包裝拉伸膜" />
               </Form.Item>
             </Col>
+            <Col xs={24} md={6}>
+              <Form.Item
+                name="item_code"
+                label="型號"
+                rules={[{ required: true, message: "請填型號" }]}
+                extra="可直接打新型號，系統會一併建品項"
+              >
+                <AutoComplete
+                  options={items.map((i) => ({
+                    value: i.item_code,
+                    label: `${i.item_code}｜${i.name}${i.meters_per_box ? `（每箱 ${i.meters_per_box} 米）` : ""}`,
+                  }))}
+                  filterOption={(input, option) =>
+                    String(option?.value ?? "").toLowerCase().includes(input.toLowerCase())
+                  }
+                  onChange={onCodeChange}
+                  placeholder="例 T6050BSW"
+                />
+              </Form.Item>
+            </Col>
+          </Row>
+
+          <Row gutter={24}>
             <Col xs={24} md={6}>
               <Form.Item
                 label={
@@ -174,8 +191,8 @@ export default function ReceivingPage() {
                     <Segmented
                       size="small"
                       value={qtyMode}
-                      onChange={(v) => setQtyMode(v as "箱" | "米")}
-                      options={["箱", "米"]}
+                      onChange={(v) => setQtyMode(v as "米" | "箱")}
+                      options={["米", "箱"]}
                       style={{ marginLeft: 8 }}
                     />
                   </span>
@@ -186,8 +203,10 @@ export default function ReceivingPage() {
                     ? preview
                       ? `= ${preview.boxes} 箱${preview.remainder ? `，剩 ${preview.remainder.toLocaleString()} 米對不上整箱` : ""}`
                       : rate
-                        ? "輸入米數自動換算"
-                        : "此料號尚未設定每箱米數"
+                        ? `每箱 ${rate.toLocaleString()} 米，輸入米數自動換算`
+                        : chosenCode
+                          ? `型號 ${chosenCode} 尚未設定每箱米數`
+                          : "先填型號"
                     : undefined
                 }
                 style={{ marginBottom: 0 }}
@@ -201,6 +220,21 @@ export default function ReceivingPage() {
                     <InputNumber min={1} step={100} style={{ width: "100%" }} addonAfter="米" />
                   </Form.Item>
                 )}
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={6}>
+              <Form.Item name="spec" label="規格">
+                <Input placeholder="例 340mm x 900M" />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={6}>
+              <Form.Item name="manufacture_date" label="製造日（標籤）">
+                <DatePicker style={{ width: "100%" }} />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={6}>
+              <Form.Item name="supplier_lot_code" label="原廠批號 ROLL#">
+                <Input placeholder="例 20250915-3081*61" />
               </Form.Item>
             </Col>
           </Row>
@@ -225,11 +259,22 @@ export default function ReceivingPage() {
                 label="每箱米數"
                 extra="設了才能用米數收貨；留空代表此品項只用箱計"
               >
-                <InputNumber min={1} step={100} style={{ width: "100%" }} addonAfter="米" placeholder="例 900" />
+                <InputNumber min={1} step={100} style={{ width: "100%" }} addonAfter="米" placeholder="例 600" />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={6}>
+              <Form.Item
+                name="supplier_code"
+                label="箱上完整料號"
+                extra="影像辨識用來對回型號，不填不影響收貨"
+              >
+                <Input placeholder="例 2003.T7320BC-340X900-P1" />
               </Form.Item>
             </Col>
           </Row>
-          {qtyMode === "米" && !rate && (
+          {/* Only once a 型號 is on the form. Warning before they have typed
+              anything is noise, and noise is how a real warning gets ignored. */}
+          {qtyMode === "米" && Boolean(chosenCode) && !rate && (
             <Alert
               type="warning"
               title="要用米數收貨，得先設定每箱米數"
@@ -262,8 +307,9 @@ export default function ReceivingPage() {
           size="middle"
           locale={{ emptyText: <Empty description="尚無批次" image={Empty.PRESENTED_IMAGE_SIMPLE} /> }}
           columns={[
-            { title: "料號", dataIndex: "item_code" },
-            { title: "品名", dataIndex: "item_name" },
+            { title: "型號", dataIndex: "item_code" },
+            { title: "原物料名稱", dataIndex: "item_name" },
+            { title: "廠商", dataIndex: "supplier", render: (v) => v ?? "—" },
             {
               title: "進貨日",
               dataIndex: "receipt_date",
@@ -279,7 +325,16 @@ export default function ReceivingPage() {
               title: "在庫",
               dataIndex: "qty_on_hand",
               align: "right" as const,
-              render: (v: number) => (v > 0 ? `${v} 箱` : <Text type="secondary">已用完</Text>),
+              render: (v: number, row: Lot) => (
+                v > 0 ? (
+                  <span>
+                    {v} 箱
+                    {row.entered_meters ? (
+                      <Text type="secondary">（單 {row.entered_meters.toLocaleString()} 米）</Text>
+                    ) : null}
+                  </span>
+                ) : <Text type="secondary">已用完</Text>
+              ),
             },
             {
               title: "",

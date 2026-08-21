@@ -57,7 +57,7 @@ export default function ItemsPage() {
       <Alert
         type="info"
         title="米數是換算用的，庫存單位仍然是箱"
-        description="一箱＝一捲，領用一次扣一箱，不做部分扣量。設了每箱米數之後，收貨可以直接輸入米數，系統換算成整箱；除不盡的餘數會明白告訴你，不會四捨五入吃掉。"
+        description="驗收單上的數量是米，這張表就是把它換算成箱的依據（例：T6050BSW 一箱 600 米）。但庫存記帳仍以箱為單位 —— 一箱＝一捲，領用一次扣一箱，不做部分扣量。除不盡的餘數會明白告訴你，不會四捨五入吃掉。"
         style={{ marginBottom: 24 }}
       />
 
@@ -73,9 +73,16 @@ export default function ItemsPage() {
           loading={Boolean(saving)}
           locale={{ emptyText: <Empty description="尚無品項，請先去收貨建批" image={Empty.PRESENTED_IMAGE_SIMPLE} /> }}
           columns={[
-            { title: "料號", dataIndex: "item_code" },
-            { title: "品名", dataIndex: "name" },
+            { title: "型號", dataIndex: "item_code", render: (v: string) => <Text strong>{v}</Text> },
+            { title: "原物料名稱", dataIndex: "name" },
             { title: "規格", dataIndex: "spec", render: (v) => v ?? "—" },
+            { title: "廠商", dataIndex: "supplier", render: (v) => v ?? "—" },
+            {
+              title: "箱上完整料號",
+              dataIndex: "supplier_code",
+              render: (v: string | null) =>
+                v ? <Text code>{v}</Text> : <Text type="secondary">未登記（辨識無法對映）</Text>,
+            },
             {
               title: "每箱米數",
               dataIndex: "meters_per_box",

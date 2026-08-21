@@ -22,7 +22,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "core"))
 
 from urdwms_core.matching import Candidate, fifo_expected, match_candidates  # noqa: E402
-from urdwms_core.normalize import to_date_key  # noqa: E402
+from urdwms_core.normalize import normalize_item_code, to_date_key  # noqa: E402
 from urdwms_core.recognition import GeminiProvider, Recognition  # noqa: E402
 from urdwms_core.units import boxes_from_meters, meters_from_boxes  # noqa: E402
 
@@ -77,8 +77,17 @@ def _provider() -> GeminiProvider:
 # --------------------------------------------------------------------------- schemas
 
 class LotIn(BaseModel):
-    item_code: str
+    """One line off the acceptance form (包材驗收單).
+
+    Field order on paper: 進貨日期 / 廠商名稱 / 原物料名稱 / 型號 / 數量(米).
+    `item_code` is the 型號 — the short code the warehouse actually writes and
+    the key of the metres table. The long code printed on the box lives in
+    `supplier_code` and exists only so recognition can map back to a 型號.
+    """
+
+    item_code: str                      # 型號, e.g. T6050BSW
     receipt_date: str
+    supplier: str | None = None         # 廠商名稱
     manufacture_date: str | None = None
     supplier_lot_code: str | None = None
     qty: int = 1
@@ -91,8 +100,10 @@ class LotIn(BaseModel):
     shelf_life_days: int | None = None
     safety_stock: int = 0
     meters_per_box: int | None = None
-    # Deliveries are sometimes counted in metres. When set, it is converted to
-    # whole boxes and `qty` is ignored — boxes remain the ledger unit (units.py).
+    supplier_code: str | None = None    # 箱上完整料號, 辨識對映用
+    # The acceptance form records quantity in metres, so this is the normal path
+    # rather than an option. Converted to whole boxes; boxes remain the ledger
+    # unit (units.py).
     qty_meters: int | None = None
 
 
@@ -104,6 +115,8 @@ class ItemIn(BaseModel):
     shelf_life_days: int | None = None
     safety_stock: int = 0
     meters_per_box: int | None = None
+    supplier_code: str | None = None
+    supplier: str | None = None
 
 
 class ItemPatch(BaseModel):
@@ -112,6 +125,8 @@ class ItemPatch(BaseModel):
     shelf_life_days: int | None = None
     safety_stock: int | None = None
     meters_per_box: int | None = None
+    supplier_code: str | None = None
+    supplier: str | None = None
 
 
 class ScanIn(BaseModel):
@@ -174,9 +189,10 @@ def create_item(payload: ItemIn) -> dict:
             raise HTTPException(409, f"料號 {payload.item_code} 已存在")
         conn.execute(
             "INSERT INTO inventory_item (item_code, name, spec, unit, shelf_life_days, safety_stock,"
-            " meters_per_box) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            " meters_per_box, supplier_code, supplier) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (payload.item_code.strip(), payload.name.strip(), payload.spec, payload.unit,
-             payload.shelf_life_days, payload.safety_stock, payload.meters_per_box),
+             payload.shelf_life_days, payload.safety_stock, payload.meters_per_box,
+             payload.supplier_code, payload.supplier),
         )
         log(conn, DEMO_USER, "item.create", {"item_code": payload.item_code})
     return {"item_code": payload.item_code}
@@ -230,9 +246,10 @@ def create_lot(payload: LotIn) -> dict:
                 raise HTTPException(400, f"料號 {item_code} 不在主檔，請一併填品名以新增品項")
             conn.execute(
                 "INSERT INTO inventory_item (item_code, name, spec, unit, shelf_life_days, safety_stock,"
-                " meters_per_box) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                " meters_per_box, supplier_code, supplier) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (item_code, payload.item_name.strip(), payload.spec, payload.unit,
-                 payload.shelf_life_days, payload.safety_stock, payload.meters_per_box),
+                 payload.shelf_life_days, payload.safety_stock, payload.meters_per_box,
+                 payload.supplier_code, payload.supplier),
             )
             created_item = True
             log(conn, DEMO_USER, "item.create", {"item_code": item_code, "name": payload.item_name})
@@ -244,6 +261,8 @@ def create_lot(payload: LotIn) -> dict:
                                   ("spec", payload.spec),
                                   ("shelf_life_days", payload.shelf_life_days),
                                   ("meters_per_box", payload.meters_per_box),
+                                  ("supplier_code", payload.supplier_code),
+                                  ("supplier", payload.supplier),
                                   ("safety_stock", payload.safety_stock or None)):
                 if value is not None:
                     updates.append(f"{column} = ?")
@@ -276,9 +295,10 @@ def create_lot(payload: LotIn) -> dict:
 
         cursor = conn.execute(
             "INSERT INTO inventory_lot (item_code, receipt_date, manufacture_date, supplier_lot_code,"
-            " qty_on_hand, created_at, created_by) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            " supplier, entered_meters, qty_on_hand, created_at, created_by)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (item_code, parsed.iso, manufacture.iso if manufacture else None,
-             payload.supplier_lot_code, qty, now(), DEMO_USER),
+             payload.supplier_lot_code, payload.supplier, payload.qty_meters, qty, now(), DEMO_USER),
         )
         lot_id = cursor.lastrowid
         log(conn, DEMO_USER, "lot.create",
@@ -325,6 +345,23 @@ async def recognize(item_code: str = Form(...), image: UploadFile = File(...)) -
             "SELECT * FROM inventory_lot WHERE item_code = ? AND qty_on_hand > 0", (item_code,)).fetchall()}
 
     result = match_candidates(to_date_key(reading.receipt_date), candidates)
+
+    # Cross-check the code on the label against the 型號 the operator picked.
+    # The label carries the long supplier code, the operator picked a short 型號,
+    # so this compares through the item's mapping (requirement 4). Only a
+    # confident mismatch is reported — an unreadable code is not evidence of
+    # anything, and a false warning here trains people to ignore the real one.
+    label_code = normalize_item_code(reading.item_code, {}) if reading.item_code else None
+    expected_long = (item["supplier_code"] or "").upper() if item else ""
+    code_matches: bool | None = None
+    if label_code and (expected_long or item_code):
+        compact = label_code.replace("-", "").replace(".", "").replace(" ", "")
+        code_matches = any(
+            compact and compact in ref.upper().replace("-", "").replace(".", "").replace(" ", "")
+            or ref.upper().replace("-", "").replace(".", "").replace(" ", "") in compact
+            for ref in filter(None, (expected_long, item_code))
+        )
+
     payload: dict = {
         "image_path": f"/uploads/{path.name}",
         "item_code": item_code,
@@ -338,6 +375,8 @@ async def recognize(item_code: str = Form(...), image: UploadFile = File(...)) -
             "notes": reading.notes,
             "error": reading.error,
         },
+        "item_code_matches": code_matches,
+        "expected_supplier_code": item["supplier_code"] if item else None,
         "candidates": [
             {"lot_id": int(c.lot_id), "receipt_date": c.receipt_date,
              "manufacture_date": lot_rows.get(c.lot_id, {}).get("manufacture_date"),

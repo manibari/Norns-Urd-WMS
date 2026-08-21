@@ -16,7 +16,7 @@
 
 import { CameraOutlined, InboxOutlined, ReloadOutlined } from "@ant-design/icons";
 import {
-  Alert, Button, Card, Col, Descriptions, Empty, Form, Input, Radio,
+  Alert, Button, Card, Col, Empty, Form, Input, Radio,
   Row, Select, Space, Spin, Tag, Typography, message,
 } from "antd";
 import Link from "next/link";
@@ -139,7 +139,7 @@ function IssueScreen() {
           onChange={(v) => { setItemCode(v); reset(); }}
           options={items.map((i) => ({
             value: i.item_code,
-            label: `${i.name}｜${i.item_code}（在庫 ${i.on_hand} ${i.unit}／${i.open_lots} 批）`,
+            label: `${i.item_code}｜${i.name}（在庫 ${i.on_hand} ${i.unit}／${i.open_lots} 批）`,
           }))}
         />
       </Card>
@@ -206,6 +206,18 @@ function IssueScreen() {
             style={{ marginTop: 24 }}
             extra={<Button icon={<ReloadOutlined />} onClick={reset}>重拍</Button>}
           >
+            {proposal.item_code_matches === false && (
+              <Alert
+                type="error"
+                title="箱上標籤跟你選的型號對不起來"
+                description={
+                  `標籤讀到「${proposal.recognition.item_code}」，但你選的型號登記的是` +
+                  `「${proposal.expected_supplier_code ?? "未登記"}」。` +
+                  "先確認是不是選錯型號，或這箱根本是別的料。"
+                }
+                style={{ marginBottom: 16 }}
+              />
+            )}
             <Row gutter={24}>
               <Col xs={24} md={10}>
                 {/* eslint-disable-next-line @next/next/no-img-element */}

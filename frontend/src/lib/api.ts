@@ -5,6 +5,9 @@ export type Lot = {
   receipt_date: string;
   manufacture_date: string | null;
   supplier_lot_code: string | null;
+  supplier: string | null;
+  /** 驗收單上填的米數原值，保留供稽核比對 */
+  entered_meters: number | null;
   qty_on_hand: number;
   is_fifo_next: boolean;
 };
@@ -18,6 +21,9 @@ export type Item = {
   safety_stock: number;
   /** 每箱米數。null = 此品項不用米數換算 */
   meters_per_box: number | null;
+  /** 箱上標籤的完整料號，影像辨識對映用 */
+  supplier_code: string | null;
+  supplier: string | null;
   on_hand: number;
   /** 在庫換算成米。meters_per_box 為 null 時也是 null */
   on_hand_m: number | null;
@@ -38,6 +44,9 @@ export type Proposal = {
     error: string | null;
   };
   candidates: { lot_id: number; receipt_date: string; manufacture_date: string | null; qty_on_hand: number }[];
+  /** 標籤讀到的料號跟所選型號對不對得上。null = 讀不到料號，無從判斷 */
+  item_code_matches: boolean | null;
+  expected_supplier_code: string | null;
   decision: "lock" | "defer";
   defer_reason: string | null;
   match_distance: number | null;
