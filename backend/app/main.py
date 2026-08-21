@@ -112,6 +112,8 @@ class LotIn(BaseModel):
     shelf_life_days: int | None = None
     safety_stock: int = 0
     meters_per_box: int | None = None
+    pack_unit: str | None = None
+    has_expiry: bool | None = None
     supplier_code: str | None = None    # 箱上完整料號, 辨識對映用
     expiry_date: str | None = None      # 標示(有效日期). 多數包材沒有
     entered_unit: str = "米"
@@ -134,6 +136,8 @@ class ItemIn(BaseModel):
     shelf_life_days: int | None = None
     safety_stock: int = 0
     meters_per_box: int | None = None
+    pack_unit: str | None = None
+    has_expiry: bool = False
     supplier_code: str | None = None
     supplier: str | None = None
 
@@ -145,6 +149,8 @@ class ItemPatch(BaseModel):
     shelf_life_days: int | None = None
     safety_stock: int | None = None
     meters_per_box: int | None = None
+    pack_unit: str | None = None
+    has_expiry: bool | None = None
     supplier_code: str | None = None
     supplier: str | None = None
 
@@ -397,6 +403,7 @@ def update_user(user_id: int, payload: UserPatch,
 # machine used to be is worse than one naming a machine that no longer exists.
 DICTIONARY_CATEGORIES: dict[str, str] = {
     "job_title": "職位名稱",
+    "pack_unit": "計量單位",
     "machine": "包裝機台",
     "packed_product": "產品名稱",
     "override_reason": "非 FIFO 覆核原因",
@@ -548,9 +555,13 @@ def update_item(item_id: int, payload: ItemPatch,
     if "name" in changes and not str(changes["name"]).strip():
         raise HTTPException(400, "原物料名稱不可空白")
     if "meters_per_box" in changes and changes["meters_per_box"] <= 0:
-        raise HTTPException(400, "每箱米數必須大於 0（不用米數換算請留空）")
+        raise HTTPException(400, "每箱數量必須大於 0（不換算請留空）")
     if "model" in changes:
         changes["model"] = str(changes["model"]).strip() or None
+    if "has_expiry" in changes:
+        changes["has_expiry"] = int(bool(changes["has_expiry"]))
+    if "pack_unit" in changes:
+        changes["pack_unit"] = str(changes["pack_unit"]).strip() or None
     with transaction() as conn:
         if not conn.execute("SELECT 1 FROM inventory_item WHERE id = ?", (item_id,)).fetchone():
             raise HTTPException(404, "品項不存在")
@@ -575,9 +586,11 @@ def create_item(payload: ItemIn, user: dict = Depends(requires("item.manage"))) 
             raise HTTPException(409, f"型號 {model} 已存在")
         cursor = conn.execute(
             "INSERT INTO inventory_item (name, model, spec, unit, shelf_life_days, safety_stock,"
-            " meters_per_box, supplier_code, supplier) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " meters_per_box, pack_unit, has_expiry, supplier_code, supplier)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (name, model, payload.spec, payload.unit, payload.shelf_life_days,
-             payload.safety_stock, payload.meters_per_box, payload.supplier_code, payload.supplier),
+             payload.safety_stock, payload.meters_per_box, payload.pack_unit,
+             int(payload.has_expiry), payload.supplier_code, payload.supplier),
         )
         log(conn, user["name"], "item.create", {"id": cursor.lastrowid, "name": name, "model": model})
     return {"id": cursor.lastrowid, "name": name, "model": model}
@@ -756,9 +769,11 @@ def create_lot(payload: LotIn, user: dict = Depends(requires("lot.create"))) -> 
                 raise HTTPException(409, f"型號 {model} 已存在，請直接選那個品項")
             cursor = conn.execute(
                 "INSERT INTO inventory_item (name, model, spec, unit, shelf_life_days, safety_stock,"
-                " meters_per_box, supplier_code, supplier) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " meters_per_box, pack_unit, has_expiry, supplier_code, supplier)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (payload.item_name.strip(), model, payload.spec, payload.unit,
                  payload.shelf_life_days, payload.safety_stock, payload.meters_per_box,
+                 payload.pack_unit, int(bool(payload.has_expiry)),
                  payload.supplier_code, payload.supplier),
             )
             item_id = cursor.lastrowid
@@ -794,6 +809,23 @@ def create_lot(payload: LotIn, user: dict = Depends(requires("lot.create"))) -> 
             "   AND COALESCE(manufacture_date, '') = COALESCE(?, '')",
             (item_id, parsed.iso, manufacture.iso if manufacture else None),
         ).fetchone()
+        # An item flagged as having a shelf life must arrive with something that
+        # pins down when it expires — the printed 有效日期, or a 製造日期 the
+        # shelf-life days can be counted from. Without either, the expiry alert
+        # has nothing to work with and would quietly never fire for this lot.
+        item_row = conn.execute("SELECT name, model, has_expiry, shelf_life_days"
+                                " FROM inventory_item WHERE id = ?", (item_id,)).fetchone()
+        if item_row and item_row["has_expiry"]:
+            has_printed = expiry is not None and expiry.iso
+            can_infer = manufacture is not None and manufacture.iso and item_row["shelf_life_days"]
+            if not (has_printed or can_infer):
+                label = item_row["model"] or item_row["name"]
+                raise HTTPException(
+                    400,
+                    f"{label} 有保存期限，請填「標示（有效日期）」；"
+                    " 或填製造日期並在基本資料設好保存天數，讓系統推算。",
+                )
+
         qty = payload.qty
         conversion = None
         if payload.qty_meters is not None:
@@ -803,11 +835,11 @@ def create_lot(payload: LotIn, user: dict = Depends(requires("lot.create"))) -> 
                                 (item_id,)).fetchone()["meters_per_box"]
             conversion = boxes_from_meters(payload.qty_meters, rate)
             if conversion is None:
-                raise HTTPException(400, "此品項尚未設定每箱米數，無法用米數收貨")
+                raise HTTPException(400, "此品項尚未設定每箱數量，無法用單上數量收貨")
             if conversion.boxes < 1:
                 raise HTTPException(
                     400,
-                    f"{payload.qty_meters:,} 米不足一箱（每箱 {rate:,} 米）。"
+                    f"{payload.qty_meters:,} 不足一箱（每箱 {rate:,}）。"
                     " 庫存以箱為單位，不做部分入庫。",
                 )
             qty = conversion.boxes

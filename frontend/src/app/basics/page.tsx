@@ -24,6 +24,8 @@ import {
 import { useCallback, useEffect, useState } from "react";
 import { useAuth } from "@/components/AuthGate";
 import CreatableSelect from "@/components/CreatableSelect";
+import { NumberCell, TextCell } from "@/components/EditableCell";
+import { useColumnWidths } from "@/components/resizable";
 import DictionaryTable from "@/components/DictionaryTable";
 import { api, type Dictionary, type Item, type SessionUser } from "@/lib/api";
 
@@ -42,10 +44,10 @@ export default function BasicsPage() {
   const [options, setOptions] = useState<{ supplier: string[]; material_name: string[]; spec: string[] }>(
     { supplier: [], material_name: [], spec: [] },
   );
-  const [editing, setEditing] = useState<Item | "new" | null>(null);
   const [busy, setBusy] = useState(false);
-  const [form] = Form.useForm();
+  const [draftForm] = Form.useForm();
   const { can, user: me } = useAuth();
+  const itemCols = useColumnWidths("items");
 
   const load = useCallback(async () => {
     const [i, d, o, r] = await Promise.allSettled([
@@ -68,22 +70,34 @@ export default function BasicsPage() {
 
   useEffect(() => { load(); }, [load]);
 
-  async function saveItem() {
-    const values = await form.validateFields().catch(() => null);
+  /** Patch one field of one row, updating just that row rather than reloading. */
+  const dictValues = (category: string) =>
+    (dict?.entries[category] ?? []).filter((e) => e.active).map((e) => e.value);
+
+  async function patchField(item: Item, field: string, value: unknown) {
+    try {
+      await api.patchItem(item.id, { [field]: value });
+      const fresh = await api.items();
+      setItems(fresh);
+      // Supplier / name / spec options are derived from the master, so a change
+      // here can introduce a new option elsewhere.
+      api.itemOptions().then(setOptions).catch(() => undefined);
+    } catch (e) {
+      message.error((e as Error).message, 6);
+      // Reload so the cell snaps back to the stored value rather than showing
+      // an edit the server rejected.
+      api.items().then(setItems).catch(() => undefined);
+    }
+  }
+
+  async function addItem() {
+    const values = await draftForm.validateFields().catch(() => null);
     if (!values) return;
     setBusy(true);
     try {
-      if (editing === "new") {
-        const created = await api.createItem(values);
-        message.success(`已新增品項 ${values.model || values.name}`);
-        void created;
-      } else if (editing) {
-        // model may be cleared, so send it explicitly rather than dropping empties.
-        await api.patchItem(editing.id, { ...values, model: values.model || null });
-        message.success("已更新");
-      }
-      setEditing(null);
-      form.resetFields();
+      await api.createItem({ ...values, model: values.model || null });
+      message.success(`已新增 ${values.model || values.name}`);
+      draftForm.resetFields();
       load();
     } catch (e) {
       message.error((e as Error).message);
@@ -109,108 +123,201 @@ export default function BasicsPage() {
       <Alert
         type="info"
         title="必填的是原物料名稱，型號可以沒有"
-        description="驗收單上「脫氧劑」那列就沒有型號，所以型號不是識別。廠商／規格也是這張表的欄位，不另開清單 —— 收貨時選了品項就會自動帶出。⚠️ 只有有型號（或登記過箱上完整料號）的品項，領用時才能靠影像辨識認出來；其餘一律人工選。"
+        description="驗收單上「脫氧劑」那列就沒有型號，所以型號不是識別。廠商／規格也是這張表的欄位，不另開清單 —— 收貨時選了品項就會自動帶出。「每箱數量」是驗收單數量換算成箱的依據，單位隨品項而定（膜是米、袋是張、劑是包），所以只填數字。⚠️ 只有有型號（或登記過箱上完整料號）的品項，領用時才能靠影像辨識認出來；其餘一律人工選。"
         style={{ marginBottom: 24 }}
       />
 
       <Card
         title="品項主檔"
-        extra={
-          <Space>
-            {unset > 0 && <Text type="secondary">{unset} 項未設米數（不能用米數收貨）</Text>}
-            {can("item.manage") && (
-              <Button
-                type="primary"
-                icon={<PlusOutlined />}
-                onClick={() => { setEditing("new"); form.resetFields(); }}
-              >
-                新增品項
-              </Button>
-            )}
-          </Space>
-        }
+        extra={unset > 0 ? <Text type="secondary">{unset} 項未設每箱數量（只能用箱數收貨）</Text> : null}
       >
+        <Space style={{ marginBottom: 12 }} wrap>
+          <Text type="secondary">
+            直接在格子裡改，離開欄位就存。原物料名稱必填，其餘都可留空。欄位邊界可拖曳調寬。
+          </Text>
+          {itemCols.hasCustomWidths && (
+            <Button size="small" type="link" onClick={itemCols.reset}>欄寬還原</Button>
+          )}
+        </Space>
         <Table
           rowKey="id"
           dataSource={items}
           pagination={false}
           size="middle"
-          scroll={{ x: 1200 }}
+          scroll={{ x: 1560 }}
           locale={{ emptyText: <Empty description="尚無品項" image={Empty.PRESENTED_IMAGE_SIMPLE} /> }}
-          columns={[
-            { title: "原物料名稱", dataIndex: "name", width: 190,
-              render: (v: string) => <Text strong>{v}</Text> },
+          columns={itemCols.resizable([
+            {
+              title: "原物料名稱", dataIndex: "name", width: 180,
+              render: (v: string, row: Item) => (
+                <TextCell value={v} strong onSave={(next) => patchField(row, "name", next)} />
+              ),
+            },
             {
               title: "型號", dataIndex: "model", width: 130,
-              render: (v: string | null) =>
-                v
-                  ? <Text style={{ whiteSpace: "nowrap" }}>{v}</Text>
-                  : <Tooltip title="沒有型號，領用時只能人工選，不走影像辨識">
-                      <Text type="secondary">（無）</Text>
-                    </Tooltip>,
+              render: (v: string | null, row: Item) => (
+                <TextCell value={v} placeholder="（無）"
+                          onSave={(next) => patchField(row, "model", next)} />
+              ),
             },
             {
-              title: "影像辨識", width: 100,
-              render: (_, row: Item) =>
-                row.recognisable ? <Tag color="blue">可辨識</Tag> : <Tag>人工選</Tag>,
+              title: "影像辨識", width: 90, align: "center" as const,
+              render: (_, row: Item) => (
+                <Tooltip title={row.recognisable
+                  ? "有型號或箱上料號，領用可用拍照辨識"
+                  : "沒有型號也沒登記箱上料號 —— 標籤上沒東西可對映，領用時人工選"}>
+                  {row.recognisable ? <Tag color="blue">可辨識</Tag> : <Tag>人工選</Tag>}
+                </Tooltip>
+              ),
             },
-            { title: "規格", dataIndex: "spec", width: 140, render: (v) => v ?? "—" },
-            { title: "廠商", dataIndex: "supplier", width: 110, render: (v) => v ?? "—" },
+            {
+              title: "規格", dataIndex: "spec", width: 140,
+              render: (v: string | null, row: Item) => (
+                <TextCell value={v} placeholder="—" onSave={(next) => patchField(row, "spec", next)} />
+              ),
+            },
+            {
+              title: "廠商", dataIndex: "supplier", width: 130,
+              render: (v: string | null, row: Item) => (
+                <CreatableSelect
+                  value={v ?? undefined}
+                  options={options.supplier}
+                  placeholder="—"
+                  addLabel="新增廠商"
+                  style={{ width: "100%" }}
+                  onChange={(next) => patchField(row, "supplier", next)}
+                />
+              ),
+            },
             {
               title: "箱上完整料號", dataIndex: "supplier_code", width: 220,
-              render: (v: string | null) =>
-                v ? <Text code>{v}</Text> : <Text type="secondary">未登記（辨識無法對映）</Text>,
+              render: (v: string | null, row: Item) => (
+                <TextCell value={v} placeholder="未登記（辨識無法對映）"
+                          onSave={(next) => patchField(row, "supplier_code", next)} />
+              ),
             },
             {
-              title: "每箱米數", dataIndex: "meters_per_box", width: 100, align: "right" as const,
-              render: (v: number | null) => (v ? `${v.toLocaleString()} 米` : <Text type="secondary">未設</Text>),
+              title: "每箱數量", dataIndex: "meters_per_box", width: 105, align: "right" as const,
+              render: (v: number | null, row: Item) => (
+                <NumberCell value={v} min={1} step={100} placeholder="未設"
+                            onSave={(next) => patchField(row, "meters_per_box", next)} />
+              ),
             },
             {
-              title: "在庫", dataIndex: "on_hand", width: 140, align: "right" as const,
+              // The unit belongs to the item: film is metres, foil bags are
+              // sheets, desiccant is packs. A single global unit would be wrong
+              // for most rows, so it travels with the item rather than the label.
+              title: "單位", dataIndex: "pack_unit", width: 95,
+              render: (v: string | null, row: Item) => (
+                <CreatableSelect
+                  value={v ?? undefined}
+                  options={dictValues("pack_unit")}
+                  placeholder="—"
+                  addLabel="新增單位"
+                  style={{ width: "100%" }}
+                  onChange={(next) => patchField(row, "pack_unit", next)}
+                />
+              ),
+            },
+            {
+              title: "在庫", dataIndex: "on_hand", width: 130, align: "right" as const,
               render: (v: number, row: Item) => (
-                <span>
+                <span style={{ paddingInlineEnd: 8 }}>
                   {v} 箱
                   {row.on_hand_m != null && (
-                    <Text type="secondary">（{row.on_hand_m.toLocaleString()} 米）</Text>
+                    <Text type="secondary">
+                      （{row.on_hand_m.toLocaleString()}{row.pack_unit ?? ""}）
+                    </Text>
                   )}
                 </span>
               ),
             },
             {
-              title: "保存期限", dataIndex: "shelf_life_days", width: 100, align: "right" as const,
-              render: (v: number | null) => (v ? `${v} 天` : <Text type="secondary">不提醒</Text>),
-            },
-            {
-              title: "安全水位", dataIndex: "safety_stock", width: 90, align: "right" as const,
-              render: (v: number) => (v > 0 ? <Tag color="blue">{v} 箱</Tag> : <Text type="secondary">未設</Text>),
-            },
-            {
-              title: "管理", width: 130, fixed: "right" as const, hidden: !can("item.manage"),
-              render: (_, row: Item) => (
+              // Whether an item expires at all is a property of the item (the
+              // form's note 1: 肉乾真空膜 needs no expiry date, 肉鬆 does). Saying
+              // "yes" then makes receiving insist on something to expire from,
+              // rather than letting the alert quietly never fire.
+              title: "效期", dataIndex: "has_expiry", width: 190,
+              render: (v: number, row: Item) => (
                 <Space size={4}>
-                  <Button
-                    size="small" type="link"
-                    onClick={() => { setEditing(row); form.setFieldsValue(row); }}
-                  >
-                    編輯
-                  </Button>
-                  {row.on_hand > 0 || row.open_lots > 0 || row.rejected_qty > 0 ? (
-                    <Tooltip title="已有進貨或領用紀錄，刪掉那些紀錄會失去對應。不再使用請停止收貨。">
-                      <Button size="small" type="link" disabled>刪除</Button>
-                    </Tooltip>
+                  <Switch
+                    size="small"
+                    checked={Boolean(v)}
+                    onChange={(next) => patchField(row, "has_expiry", next)}
+                  />
+                  {v ? (
+                    <Space size={4}>
+                      <Text type="secondary" style={{ fontSize: 12 }}>有</Text>
+                      <NumberCell
+                        value={row.shelf_life_days} min={1} placeholder="天數"
+                        onSave={(next) => patchField(row, "shelf_life_days", next)}
+                      />
+                      <Text type="secondary" style={{ fontSize: 12 }}>天</Text>
+                    </Space>
                   ) : (
-                    <Popconfirm
-                      title={`刪除 ${row.label}？`}
-                      okText="刪除" cancelText="取消" okButtonProps={{ danger: true }}
-                      onConfirm={() => removeItem(row)}
-                    >
-                      <Button size="small" type="link" danger>刪除</Button>
-                    </Popconfirm>
+                    <Tooltip title="收貨不會要求有效日期，也不發效期提醒">
+                      <Text type="secondary" style={{ fontSize: 12 }}>無</Text>
+                    </Tooltip>
                   )}
                 </Space>
               ),
             },
-          ]}
+            {
+              title: "安全水位", dataIndex: "safety_stock", width: 100, align: "right" as const,
+              render: (v: number, row: Item) => (
+                <NumberCell value={v} min={0} placeholder="未設"
+                            onSave={(next) => patchField(row, "safety_stock", next ?? 0)} />
+              ),
+            },
+            {
+              title: "", width: 60, fixed: "right" as const, hidden: !can("item.manage"),
+              render: (_, row: Item) =>
+                row.on_hand > 0 || row.open_lots > 0 || row.rejected_qty > 0 ? (
+                  <Tooltip title="已有進貨或領用紀錄，刪掉那些紀錄會失去對應">
+                    <Button size="small" type="text" disabled>刪除</Button>
+                  </Tooltip>
+                ) : (
+                  <Popconfirm
+                    title={`刪除 ${row.label}？`}
+                    okText="刪除" cancelText="取消" okButtonProps={{ danger: true }}
+                    onConfirm={() => removeItem(row)}
+                  >
+                    <Button size="small" type="text" danger>刪除</Button>
+                  </Popconfirm>
+                ),
+            },
+          ])}
+          footer={can("item.manage") ? () => (
+            <Form form={draftForm} layout="inline" onFinish={addItem} style={{ rowGap: 8 }}>
+              <Form.Item
+                name="name"
+                rules={[{ required: true, message: "原物料名稱必填" }]}
+                style={{ marginInlineEnd: 8 }}
+              >
+                <Input placeholder="原物料名稱（必填）" style={{ width: 190 }} />
+              </Form.Item>
+              <Form.Item name="model" style={{ marginInlineEnd: 8 }}>
+                <Input placeholder="型號（可留空）" style={{ width: 150 }} />
+              </Form.Item>
+              <Form.Item name="spec" style={{ marginInlineEnd: 8 }}>
+                <Input placeholder="規格" style={{ width: 140 }} />
+              </Form.Item>
+              <Form.Item name="supplier" style={{ marginInlineEnd: 8 }}>
+                <CreatableSelect options={options.supplier} placeholder="廠商"
+                                 addLabel="新增廠商" style={{ width: 130 }} />
+              </Form.Item>
+              <Form.Item name="meters_per_box" style={{ marginInlineEnd: 8 }}>
+                <InputNumber placeholder="每箱數量" min={1} step={100} style={{ width: 110 }} />
+              </Form.Item>
+              <Form.Item name="pack_unit" style={{ marginInlineEnd: 8 }}>
+                <CreatableSelect options={dictValues("pack_unit")} placeholder="單位"
+                                 addLabel="新增單位" style={{ width: 90 }} />
+              </Form.Item>
+              <Button type="primary" icon={<PlusOutlined />} htmlType="submit" loading={busy}>
+                新增
+              </Button>
+            </Form>
+          ) : undefined}
         />
       </Card>
     </>
@@ -254,76 +361,6 @@ export default function BasicsPage() {
         />
       </Card>
 
-      <Modal
-        open={Boolean(editing)}
-        title={editing === "new" ? "新增品項" : `編輯品項 ${editing && editing !== "new" ? editing.label : ""}`}
-        onCancel={() => { setEditing(null); form.resetFields(); }}
-        onOk={saveItem}
-        confirmLoading={busy}
-        okText="儲存" cancelText="取消" width={760} destroyOnHidden
-      >
-        <Form form={form} layout="vertical">
-          <Row gutter={16}>
-            <Col span={8}>
-              <Form.Item
-                name="name" label="原物料名稱"
-                rules={[{ required: true, message: "請填原物料名稱" }]}
-                extra="識別品項用的就是這個"
-              >
-                <CreatableSelect options={options.material_name} placeholder="選或直接輸入"
-                                 addLabel="新增名稱" />
-              </Form.Item>
-            </Col>
-            <Col span={8}>
-              <Form.Item
-                name="model" label="型號"
-                extra="沒有型號可以留空（例：脫氧劑）。留空的話領用不走影像辨識"
-              >
-                <Input placeholder="例 T6050BSW" allowClear />
-              </Form.Item>
-            </Col>
-            <Col span={8}>
-              <Form.Item name="spec" label="規格">
-                <CreatableSelect options={options.spec} placeholder="選或直接輸入"
-                                 addLabel="新增規格" />
-              </Form.Item>
-            </Col>
-          </Row>
-          <Row gutter={16}>
-            <Col span={8}>
-              <Form.Item name="supplier" label="廠商">
-                <CreatableSelect options={options.supplier} placeholder="選或直接輸入"
-                                 addLabel="新增廠商" />
-              </Form.Item>
-            </Col>
-            <Col span={16}>
-              <Form.Item
-                name="supplier_code" label="箱上完整料號"
-                extra="影像辨識讀到的是這個，用來對回型號。不填則辨識時要人工選型號"
-              >
-                <Input placeholder="例 2003.T7320BC-340X900-P1" />
-              </Form.Item>
-            </Col>
-          </Row>
-          <Row gutter={16}>
-            <Col span={8}>
-              <Form.Item name="meters_per_box" label="每箱米數" extra="設了才能用米數收貨">
-                <InputNumber min={1} step={100} style={{ width: "100%" }} placeholder="例 600" />
-              </Form.Item>
-            </Col>
-            <Col span={8}>
-              <Form.Item name="shelf_life_days" label="保存期限（天）" extra="留空則不發效期提醒">
-                <InputNumber min={1} style={{ width: "100%" }} placeholder="例 540" />
-              </Form.Item>
-            </Col>
-            <Col span={8}>
-              <Form.Item name="safety_stock" label="安全水位（箱）" extra="低於此值發低水位提醒">
-                <InputNumber min={0} style={{ width: "100%" }} />
-              </Form.Item>
-            </Col>
-          </Row>
-        </Form>
-      </Modal>
     </>
   );
 }

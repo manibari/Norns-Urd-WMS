@@ -32,7 +32,12 @@ CREATE TABLE IF NOT EXISTS inventory_item (
     unit             TEXT NOT NULL DEFAULT '箱',
     shelf_life_days  INTEGER,
     safety_stock     INTEGER NOT NULL DEFAULT 0,
-    meters_per_box   INTEGER,         -- 每箱米數. NULL = 此品項不用米數換算
+    -- 每箱數量 + 單位. 單位隨品項而定 (膜是米, 袋是張, 劑是包), 所以跟著品項存.
+    meters_per_box   INTEGER,         -- NULL = 不換算, 只能用箱數收貨
+    pack_unit        TEXT,            -- 米 | 張 | 包 | 捲 ...
+    -- 有沒有保存期限. 有的話收貨必須留下到期依據 (標示有效日期, 或製造日+保存天數).
+    -- 驗收單註記: 肉乾真空膜不需填有效日期, 肉鬆產品要填 —— 這是品項的性質.
+    has_expiry       INTEGER NOT NULL DEFAULT 0,
     -- 箱上標籤印的完整料號 (例 2003.T7320BC-340X900-P1). 人不填這個, 影像辨識讀到的
     -- 是它, 用來對映回品項 (requirement 4 正規化對映表).
     supplier_code    TEXT,
@@ -181,6 +186,8 @@ _ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("inventory_lot", "confirmed_by", "confirmed_by TEXT"),
     ("inventory_lot", "remark", "remark TEXT"),
     ("app_user", "title", "title TEXT"),
+    ("inventory_item", "pack_unit", "pack_unit TEXT"),
+    ("inventory_item", "has_expiry", "has_expiry INTEGER NOT NULL DEFAULT 0"),
 )
 
 

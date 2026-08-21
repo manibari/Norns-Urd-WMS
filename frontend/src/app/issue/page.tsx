@@ -282,7 +282,7 @@ export default function IssuePage() {
                         image={Empty.PRESENTED_IMAGE_SIMPLE}
                         description={`${proposal.item_label} 沒有可領用的在庫批次`}
                       >
-                        <Link href="/">
+                        <Link href="/receiving">
                           <Button type="primary" icon={<InboxOutlined />}>去收貨建批</Button>
                         </Link>
                       </Empty>

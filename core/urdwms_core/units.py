@@ -32,8 +32,10 @@ class BoxConversion:
     def note(self) -> str | None:
         if self.exact:
             return None
-        return (f"{self.entered_m:,} 米 ÷ {self.meters_per_box:,} 米/箱 = {self.boxes} 箱，"
-                f"剩 {self.remainder_m:,} 米對不上整箱")
+        # No unit named: an item is counted in whatever it is counted in —
+        # metres of film, sheets of foil, packs of desiccant.
+        return (f"{self.entered_m:,} ÷ {self.meters_per_box:,}/箱 = {self.boxes} 箱，"
+                f"剩 {self.remainder_m:,} 對不上整箱")
 
 
 def boxes_from_meters(meters: int, meters_per_box: int | None) -> BoxConversion | None:

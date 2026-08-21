@@ -41,7 +41,12 @@ export type Item = {
   shelf_life_days: number | null;
   safety_stock: number;
   /** 每箱米數。null = 此品項不用米數換算 */
+  /** 每箱數量。單位見 pack_unit */
   meters_per_box: number | null;
+  /** 計量單位（米／張／包…）。隨品項而定 */
+  pack_unit: string | null;
+  /** 這個品項有沒有保存期限。有的話收貨必須留下到期依據 */
+  has_expiry: number;
   rejected_qty: number;
   /** 箱上標籤的完整料號，影像辨識對映用 */
   supplier_code: string | null;

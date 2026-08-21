@@ -27,6 +27,8 @@ class Conversion(unittest.TestCase):
         self.assertFalse(result.exact)
         assert result.note is not None
         self.assertIn("500", result.note)
+        # No unit named — an item is counted in whatever it is counted in.
+        self.assertNotIn("米", result.note)
 
     def test_less_than_one_box(self):
         result = boxes_from_meters(400, 900)

@@ -4,6 +4,7 @@ import {
   AlertOutlined,
   CameraOutlined,
   InboxOutlined,
+  DatabaseOutlined,
   FileTextOutlined,
   ProfileOutlined,
   TableOutlined,
@@ -25,10 +26,14 @@ const { Sider, Content } = Layout;
 // control — the server enforces the same permission on every endpoint, because
 // a menu item that is merely absent is one typed URL away from being present.
 const NAV = [
+  // The landing screen answers "what have we got, which box next" — the
+  // question people walk up to the system with. Everyone sees it.
+  { key: "/", icon: <DatabaseOutlined />, needs: null,
+    label: <Link href="/">庫存總覽</Link> },
   { key: "/basics", icon: <TableOutlined />, needs: "item.manage",
     label: <Link href="/basics">1. 基本資料</Link> },
-  { key: "/", icon: <InboxOutlined />, needs: "lot.create",
-    label: <Link href="/">2. 收貨建批</Link> },
+  { key: "/receiving", icon: <InboxOutlined />, needs: "lot.create",
+    label: <Link href="/receiving">2. 收貨建批</Link> },
   { key: "/issue", icon: <CameraOutlined />, needs: "issue.create",
     label: <Link href="/issue">3. 領用登錄</Link> },
   { key: "/records", icon: <ProfileOutlined />, needs: null,
