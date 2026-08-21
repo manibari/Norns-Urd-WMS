@@ -134,10 +134,44 @@ export type Dictionary = {
   entries: Record<string, DictEntry[]>;
 };
 
+export type SessionUser = {
+  id: number;
+  username: string;
+  /** 顯示名／簽核名 —— 會寫進紀錄人與稽核軌跡 */
+  name: string;
+  role: string;
+  role_label: string;
+  must_change: boolean;
+  permissions: string[];
+};
+
+const TOKEN_KEY = "urdwms.token";
+
+export const token = {
+  get: () => (typeof window === "undefined" ? null : localStorage.getItem(TOKEN_KEY)),
+  set: (value: string) => localStorage.setItem(TOKEN_KEY, value),
+  clear: () => localStorage.removeItem(TOKEN_KEY),
+};
+
+/** Thrown on 401 so the shell can send the user back to the PIN pad. */
+export class Unauthenticated extends Error {}
+
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(path, { cache: "no-store", ...init });
+  const auth = token.get();
+  const res = await fetch(path, {
+    cache: "no-store",
+    ...init,
+    headers: {
+      ...(init?.headers ?? {}),
+      ...(auth ? { Authorization: `Bearer ${auth}` } : {}),
+    },
+  });
   if (!res.ok) {
     const body = await res.json().catch(() => ({ detail: res.statusText }));
+    if (res.status === 401) {
+      token.clear();
+      throw new Unauthenticated(body.detail ?? "請先登入");
+    }
     throw new Error(body.detail ?? "請求失敗");
   }
   return res.json();
@@ -150,6 +184,22 @@ const json = (body: unknown): RequestInit => ({
 });
 
 export const api = {
+  signers: () => req<{ name: string; role_label: string }[]>("/api/auth/signers"),
+  login: (username: string, password: string) =>
+    req<{ token: string; expires_at: string; user: SessionUser }>(
+      "/api/auth/login", json({ username, password })),
+  changePassword: (current_password: string, new_password: string) =>
+    req<{ ok: boolean }>("/api/auth/password", json({ current_password, new_password })),
+  logout: () => req<{ ok: boolean }>("/api/auth/logout", { method: "POST" }),
+  me: () => req<SessionUser>("/api/auth/me"),
+  users: () => req<(SessionUser & { active: number; created_at: string })[]>("/api/users"),
+  createUser: (body: Record<string, unknown>) => req<Record<string, unknown>>("/api/users", json(body)),
+  patchUser: (id: number, body: Record<string, unknown>) =>
+    req<Record<string, unknown>>(`/api/users/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
   items: () => req<Item[]>("/api/items"),
   lots: (itemCode?: string) =>
     req<Lot[]>(`/api/lots${itemCode ? `?item_code=${encodeURIComponent(itemCode)}` : ""}`),
@@ -185,6 +235,9 @@ export const api = {
   override: (id: number, reason: string) =>
     req<{ id: number; status: string }>(`/api/scans/${id}/override`, json({ reason })),
   alerts: () => req<Alerts>("/api/alerts"),
+  createItem: (body: Record<string, unknown>) => req<Record<string, unknown>>("/api/items", json(body)),
+  deleteItem: (code: string) =>
+    req<{ item_code: string; deleted: boolean }>(`/api/items/${encodeURIComponent(code)}`, { method: "DELETE" }),
   patchLot: (id: number, body: Record<string, unknown>) =>
     req<{ id: number; changed: Record<string, unknown>; posted_draws: number }>(`/api/lots/${id}`, {
       method: "PATCH",

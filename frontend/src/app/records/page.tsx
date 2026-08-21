@@ -183,7 +183,7 @@ export default function RecordsPage() {
             const after = detail.after as Record<string, unknown> | undefined;
             if (before && after) {
               return (
-                <Space direction="vertical" size={0}>
+                <Space orientation="vertical" size={0}>
                   {Object.keys(after).map((k) => (
                     <span key={k}>
                       <Text type="secondary">{k}：</Text>

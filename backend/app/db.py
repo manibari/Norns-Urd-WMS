@@ -81,6 +81,25 @@ CREATE TABLE IF NOT EXISTS material_usage_scan (
     created_at           TEXT NOT NULL
 );
 
+-- 使用者與角色.
+CREATE TABLE IF NOT EXISTS app_user (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    username      TEXT NOT NULL UNIQUE,   -- 登入帳號
+    name          TEXT NOT NULL,          -- 顯示名/簽核名, 會寫進紀錄人與稽核軌跡
+    role          TEXT NOT NULL,          -- operator | warehouse | supervisor | admin
+    password_hash TEXT NOT NULL,
+    active        INTEGER NOT NULL DEFAULT 1,
+    must_change   INTEGER NOT NULL DEFAULT 0,  -- 管理者重設密碼後強制更改
+    created_at    TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS app_session (
+    token      TEXT PRIMARY KEY,
+    user_id    INTEGER NOT NULL REFERENCES app_user(id),
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL
+);
+
 -- 下拉選項的字典. 收貨與領用的每個選單都從這裡來, 不是寫死在程式或前端.
 -- 這是 US-11 廠別配置的第一塊: 換一家工廠, 換這張表的內容, 不動程式.
 CREATE TABLE IF NOT EXISTS dictionary (

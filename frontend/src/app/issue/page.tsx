@@ -253,7 +253,7 @@ export default function IssuePage() {
                       onChange={(e) => setChosenLot(e.target.value)}
                       style={{ display: "block", marginTop: 12 }}
                     >
-                      <Space direction="vertical" style={{ width: "100%" }} size={12}>
+                      <Space orientation="vertical" style={{ width: "100%" }} size={12}>
                         {proposal.candidates.map((c) => (
                           <Radio
                             key={c.lot_id}

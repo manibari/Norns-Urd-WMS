@@ -66,6 +66,18 @@ DICTIONARY = {
 }
 
 
+# Four accounts covering the roles on the form: the person who writes the line,
+# the person who confirms it, the line operator, and someone to manage the rest.
+# Demo passwords — a real deployment sets these per person on first login.
+USERS = [
+    # 帳號, 顯示名(簽核用), 角色, 密碼
+    ("kuo", "郭", "warehouse", "urdwms2026"),
+    ("huang", "黃揚文", "supervisor", "urdwms2026"),
+    ("operator", "線上作業員", "operator", "urdwms2026"),
+    ("peter", "Peter", "admin", "peter0821"),
+]
+
+
 def main() -> int:
     init_db()
     with transaction() as conn:
@@ -88,14 +100,23 @@ def main() -> int:
                 (code, receipt.isoformat(), manufacture, expiry, roll, "臺灣希悅爾", entered, unit,
                  INSPECTION_PASS if verdict == "合格" else INSPECTION_FAIL, verdict,
                  "郭", "黃揚文", remark, qty, now()))
+        from app.auth import hash_password
+        for username, name, role, password in USERS:
+            conn.execute(
+                "INSERT OR IGNORE INTO app_user (username, name, role, password_hash, created_at)"
+                " VALUES (?,?,?,?,?)",
+                (username, name, role, hash_password(password), now()))
+
         for category, values in DICTIONARY.items():
             for order, value in enumerate(values):
                 conn.execute(
                     "INSERT OR IGNORE INTO dictionary (category, value, sort_order, created_at)"
                     " VALUES (?,?,?,?)", (category, value, order, now()))
-        log(conn, "seed", "seed.run", {"items": len(ITEMS), "lots": len(LOTS),
+        log(conn, "seed", "seed.run", {"items": len(ITEMS), "lots": len(LOTS), "users": len(USERS),
                                        "dictionary": sum(len(v) for v in DICTIONARY.values())})
-    print(f"seeded {len(ITEMS)} items, {len(LOTS)} lots")
+    print(f"seeded {len(ITEMS)} items, {len(LOTS)} lots, {len(USERS)} users")
+    print("  登入帳號：" + "、".join(f"{u}（{n}）" for u, n, _, _ in USERS))
+    print(f"  demo 密碼：{USERS[0][3]}")
     return 0
 
 

@@ -13,7 +13,7 @@ import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -28,10 +28,13 @@ from urdwms_core.normalize import normalize_item_code, to_date_key  # noqa: E402
 from urdwms_core.recognition import GeminiProvider, Recognition  # noqa: E402
 from urdwms_core.units import boxes_from_meters, meters_from_boxes  # noqa: E402
 
+from .auth import (  # noqa: E402
+    PERMISSIONS, ROLE_LABELS, check_password_policy, create_session, current_user,
+    hash_password, requires, verify_password,
+)
 from .db import init_db, log, now, transaction  # noqa: E402
 
 UPLOADS = Path(__file__).resolve().parents[1] / "uploads"
-DEMO_USER = "demo.operator"
 
 app = FastAPI(title="Urd-WMS", version="0.1.0")
 app.add_middleware(
@@ -111,7 +114,6 @@ class LotIn(BaseModel):
     # 檢驗項目: 規格尺寸 / 標示製造日期 / 標示有效日期 / 外觀 / 顏色
     inspection: dict = {}
     verdict: str | None = None          # 合格 | 不合格
-    recorded_by: str | None = None
     confirmed_by: str | None = None
     remark: str | None = None
     # The acceptance form records quantity in metres, so this is the normal path
@@ -154,7 +156,6 @@ class LotPatch(BaseModel):
     qty_on_hand: int | None = None
     verdict: str | None = None
     remark: str | None = None
-    actor: str = "admin"
 
 
 class ScanIn(BaseModel):
@@ -171,7 +172,168 @@ class ScanIn(BaseModel):
 
 class OverrideIn(BaseModel):
     reason: str
-    actor: str = "demo.supervisor"
+
+
+# --------------------------------------------------------------------------- auth
+
+class LoginIn(BaseModel):
+    username: str
+    password: str
+
+
+class UserIn(BaseModel):
+    username: str
+    name: str
+    role: str
+    password: str
+
+
+class UserPatch(BaseModel):
+    name: str | None = None
+    role: str | None = None
+    password: str | None = None
+    active: bool | None = None
+
+
+class PasswordChangeIn(BaseModel):
+    current_password: str
+    new_password: str
+
+
+@app.get("/api/auth/signers")
+def signers(user: dict = Depends(current_user)) -> list[dict]:
+    """Names that can appear as 確認人 — requires a session.
+
+    Not public: an unauthenticated list of valid accounts is a list of things to
+    guess passwords against.
+    """
+    with transaction() as conn:
+        rows = conn.execute(
+            "SELECT name, role FROM app_user WHERE active = 1 ORDER BY role, name").fetchall()
+    return [{"name": r["name"], "role_label": ROLE_LABELS.get(r["role"], r["role"])} for r in rows]
+
+
+@app.post("/api/auth/login")
+def login(payload: LoginIn) -> dict:
+    with transaction() as conn:
+        row = conn.execute("SELECT * FROM app_user WHERE username = ? AND active = 1",
+                           (payload.username.strip().lower(),)).fetchone()
+    # One message for both failures. Distinguishing "no such account" from "wrong
+    # password" tells an attacker which usernames are worth attacking.
+    if row is None or not verify_password(payload.password, row["password_hash"]):
+        raise HTTPException(401, "帳號或密碼不正確")
+    token, expires = create_session(row["id"])
+    with transaction() as conn:
+        log(conn, row["name"], "auth.login", {"role": row["role"], "username": row["username"]})
+    return {
+        "token": token, "expires_at": expires,
+        "user": {"id": row["id"], "username": row["username"], "name": row["name"],
+                 "role": row["role"], "role_label": ROLE_LABELS.get(row["role"], row["role"]),
+                 "must_change": bool(row["must_change"]),
+                 "permissions": sorted(PERMISSIONS.get(row["role"], set()))},
+    }
+
+
+@app.post("/api/auth/password")
+def change_password(payload: PasswordChangeIn, user: dict = Depends(current_user)) -> dict:
+    """Change your own password. Requires the current one — otherwise a borrowed
+    session becomes a permanent takeover."""
+    check_password_policy(payload.new_password)
+    with transaction() as conn:
+        row = conn.execute("SELECT password_hash FROM app_user WHERE id = ?", (user["id"],)).fetchone()
+        if not verify_password(payload.current_password, row["password_hash"]):
+            raise HTTPException(401, "目前密碼不正確")
+        conn.execute("UPDATE app_user SET password_hash = ?, must_change = 0 WHERE id = ?",
+                     (hash_password(payload.new_password), user["id"]))
+        # Every other session for this account dies: changing a password is what
+        # someone does when they think it is known, so leaving old sessions alive
+        # defeats the point.
+        conn.execute("DELETE FROM app_session WHERE user_id = ?", (user["id"],))
+        log(conn, user["name"], "auth.password_change", {"user_id": user["id"]})
+    return {"ok": True, "reauth_required": True}
+
+
+@app.post("/api/auth/logout")
+def logout(authorization: str | None = Header(default=None)) -> dict:
+    token = (authorization or "").removeprefix("Bearer ").strip()
+    with transaction() as conn:
+        conn.execute("DELETE FROM app_session WHERE token = ?", (token,))
+    return {"ok": True}
+
+
+@app.get("/api/auth/me")
+def me(user: dict = Depends(current_user)) -> dict:
+    return {**user, "role_label": ROLE_LABELS.get(user["role"], user["role"])}
+
+
+@app.get("/api/users")
+def users(user: dict = Depends(requires("user.manage"))) -> list[dict]:
+    with transaction() as conn:
+        rows = conn.execute("SELECT id, username, name, role, active, must_change, created_at"
+                            " FROM app_user ORDER BY role, name").fetchall()
+    return [{**dict(r), "role_label": ROLE_LABELS.get(r["role"], r["role"])} for r in rows]
+
+
+@app.post("/api/users")
+def create_user(payload: UserIn, user: dict = Depends(requires("user.manage"))) -> dict:
+    if payload.role not in PERMISSIONS:
+        raise HTTPException(400, f"未知的角色 {payload.role}")
+    check_password_policy(payload.password)
+    username = payload.username.strip().lower()
+    if not username:
+        raise HTTPException(400, "帳號不可空白")
+    with transaction() as conn:
+        if conn.execute("SELECT 1 FROM app_user WHERE username = ?", (username,)).fetchone():
+            raise HTTPException(409, f"帳號「{username}」已存在")
+        cursor = conn.execute(
+            "INSERT INTO app_user (username, name, role, password_hash, must_change, created_at)"
+            " VALUES (?,?,?,?,1,?)",
+            (username, payload.name.strip(), payload.role, hash_password(payload.password), now()))
+        # Created with a password someone else chose, so it must be changed on
+        # first login — otherwise the admin knows everyone's password forever.
+        log(conn, user["name"], "user.create", {"username": username, "role": payload.role})
+    return {"id": cursor.lastrowid, "username": username, "name": payload.name, "role": payload.role}
+
+
+@app.patch("/api/users/{user_id}")
+def update_user(user_id: int, payload: UserPatch,
+                user: dict = Depends(requires("user.manage"))) -> dict:
+    changes: dict = {}
+    if payload.role is not None:
+        if payload.role not in PERMISSIONS:
+            raise HTTPException(400, f"未知的角色 {payload.role}")
+        changes["role"] = payload.role
+    if payload.name is not None and payload.name.strip():
+        changes["name"] = payload.name.strip()
+    if payload.password is not None:
+        check_password_policy(payload.password)
+        changes["password_hash"] = hash_password(payload.password)
+        changes["must_change"] = 1
+    if payload.active is not None:
+        changes["active"] = int(payload.active)
+    if not changes:
+        raise HTTPException(400, "沒有要更新的欄位")
+    with transaction() as conn:
+        row = conn.execute("SELECT * FROM app_user WHERE id = ?", (user_id,)).fetchone()
+        if row is None:
+            raise HTTPException(404, "使用者不存在")
+        # Locking out the last admin leaves nobody able to unlock anyone.
+        if row["role"] == "admin" and (changes.get("role", "admin") != "admin" or changes.get("active") == 0):
+            remaining = conn.execute(
+                "SELECT COUNT(*) AS n FROM app_user WHERE role = 'admin' AND active = 1 AND id <> ?",
+                (user_id,)).fetchone()["n"]
+            if remaining == 0:
+                raise HTTPException(409, "這是最後一個啟用中的管理者，不能停用或降級")
+        conn.execute(f"UPDATE app_user SET {', '.join(f'{k} = ?' for k in changes)} WHERE id = ?",
+                     (*changes.values(), user_id))
+        # Changing a role or disabling an account must take effect now, not in
+        # twelve hours when the session happens to expire.
+        if "role" in changes or changes.get("active") == 0 or "password_hash" in changes:
+            conn.execute("DELETE FROM app_session WHERE user_id = ?", (user_id,))
+        log(conn, user["name"], "user.update",
+            {"user_id": user_id,
+             "changed": {k: ("***" if k == "password_hash" else v) for k, v in changes.items()}})
+    return {"id": user_id, "changed": list(changes)}
 
 
 # --------------------------------------------------------------------------- dictionary
@@ -204,7 +366,8 @@ class DictionaryPatch(BaseModel):
 
 
 @app.get("/api/dictionary")
-def dictionary(category: str | None = None, include_inactive: bool = False) -> dict:
+def dictionary(category: str | None = None, include_inactive: bool = False,
+               user: dict = Depends(current_user)) -> dict:
     sql = "SELECT * FROM dictionary WHERE 1=1"
     params: list = []
     if category:
@@ -222,7 +385,8 @@ def dictionary(category: str | None = None, include_inactive: bool = False) -> d
 
 
 @app.post("/api/dictionary")
-def create_dictionary_entry(payload: DictionaryIn) -> dict:
+def create_dictionary_entry(payload: DictionaryIn,
+                            user: dict = Depends(requires("dictionary.manage"))) -> dict:
     if payload.category not in DICTIONARY_CATEGORIES:
         raise HTTPException(400, f"未知的字典類別 {payload.category}")
     value = payload.value.strip()
@@ -238,17 +402,18 @@ def create_dictionary_entry(payload: DictionaryIn) -> dict:
             # Re-adding a retired value revives the original row so historical
             # records keep pointing at the same entry.
             conn.execute("UPDATE dictionary SET active = 1 WHERE id = ?", (existing["id"],))
-            log(conn, DEMO_USER, "dictionary.revive", {"id": existing["id"], "value": value})
+            log(conn, user["name"], "dictionary.revive", {"id": existing["id"], "value": value})
             return {"id": existing["id"], "value": value, "revived": True}
         cursor = conn.execute(
             "INSERT INTO dictionary (category, value, sort_order, created_at) VALUES (?,?,?,?)",
             (payload.category, value, payload.sort_order, now()))
-        log(conn, DEMO_USER, "dictionary.create", {"category": payload.category, "value": value})
+        log(conn, user["name"], "dictionary.create", {"category": payload.category, "value": value})
     return {"id": cursor.lastrowid, "value": value, "revived": False}
 
 
 @app.patch("/api/dictionary/{entry_id}")
-def update_dictionary_entry(entry_id: int, payload: DictionaryPatch) -> dict:
+def update_dictionary_entry(entry_id: int, payload: DictionaryPatch,
+                            user: dict = Depends(requires("dictionary.manage"))) -> dict:
     changes = {k: v for k, v in payload.model_dump().items() if v is not None}
     if not changes:
         raise HTTPException(400, "沒有要更新的欄位")
@@ -263,7 +428,7 @@ def update_dictionary_entry(entry_id: int, payload: DictionaryPatch) -> dict:
             raise HTTPException(404, "字典項目不存在")
         conn.execute(f"UPDATE dictionary SET {', '.join(f'{k} = ?' for k in changes)} WHERE id = ?",
                      (*changes.values(), entry_id))
-        log(conn, DEMO_USER, "dictionary.update", {"id": entry_id, **changes})
+        log(conn, user["name"], "dictionary.update", {"id": entry_id, **changes})
     return {"id": entry_id, **changes}
 
 
@@ -275,7 +440,7 @@ def health() -> dict:
 
 
 @app.get("/api/items")
-def items() -> list[dict]:
+def items(user: dict = Depends(current_user)) -> list[dict]:
     with transaction() as conn:
         rows = conn.execute(
             # "在庫" means drawable. A rejected lot is physically present but must
@@ -294,7 +459,8 @@ def items() -> list[dict]:
 
 
 @app.patch("/api/items/{item_code:path}")
-def update_item(item_code: str, payload: ItemPatch) -> dict:
+def update_item(item_code: str, payload: ItemPatch,
+                user: dict = Depends(requires("item.manage"))) -> dict:
     """Edit the master record, including the metres-per-box rate."""
     changes = {k: v for k, v in payload.model_dump().items() if v is not None}
     if not changes:
@@ -306,12 +472,12 @@ def update_item(item_code: str, payload: ItemPatch) -> dict:
             raise HTTPException(404, f"料號 {item_code} 不存在")
         conn.execute(f"UPDATE inventory_item SET {', '.join(f'{k} = ?' for k in changes)}"
                      " WHERE item_code = ?", (*changes.values(), item_code))
-        log(conn, DEMO_USER, "item.update", {"item_code": item_code, **changes})
+        log(conn, user["name"], "item.update", {"item_code": item_code, **changes})
     return {"item_code": item_code, **changes}
 
 
 @app.post("/api/items")
-def create_item(payload: ItemIn) -> dict:
+def create_item(payload: ItemIn, user: dict = Depends(requires("item.manage"))) -> dict:
     with transaction() as conn:
         if conn.execute("SELECT 1 FROM inventory_item WHERE item_code = ?", (payload.item_code,)).fetchone():
             raise HTTPException(409, f"料號 {payload.item_code} 已存在")
@@ -322,12 +488,39 @@ def create_item(payload: ItemIn) -> dict:
              payload.shelf_life_days, payload.safety_stock, payload.meters_per_box,
              payload.supplier_code, payload.supplier),
         )
-        log(conn, DEMO_USER, "item.create", {"item_code": payload.item_code})
+        log(conn, user["name"], "item.create", {"item_code": payload.item_code})
     return {"item_code": payload.item_code}
 
 
+@app.delete("/api/items/{item_code:path}")
+def delete_item(item_code: str, user: dict = Depends(requires("item.manage"))) -> dict:
+    """Delete a 型號 — only while no lot references it.
+
+    Same boundary as deleting a lot: the master record is what a usage record's
+    item_code resolves to, so removing one with history behind it turns every
+    traceability answer about it into a dangling code.
+    """
+    with transaction() as conn:
+        row = conn.execute("SELECT * FROM inventory_item WHERE item_code = ?", (item_code,)).fetchone()
+        if row is None:
+            raise HTTPException(404, f"型號 {item_code} 不存在")
+        lots = conn.execute("SELECT COUNT(*) AS n FROM inventory_lot WHERE item_code = ?",
+                            (item_code,)).fetchone()["n"]
+        scans = conn.execute("SELECT COUNT(*) AS n FROM material_usage_scan WHERE item_code = ?",
+                             (item_code,)).fetchone()["n"]
+        if lots or scans:
+            raise HTTPException(
+                409,
+                f"型號 {item_code} 已有 {lots} 批進貨、{scans} 筆領用紀錄，刪掉會讓那些紀錄失去對應。"
+                " 不再使用請把安全水位設 0 並停止收貨。",
+            )
+        conn.execute("DELETE FROM inventory_item WHERE item_code = ?", (item_code,))
+        log(conn, user["name"], "item.delete", {"item_code": item_code, "name": row["name"]})
+    return {"item_code": item_code, "deleted": True}
+
+
 @app.get("/api/lots")
-def lots(item_code: str | None = None) -> list[dict]:
+def lots(item_code: str | None = None, user: dict = Depends(current_user)) -> list[dict]:
     with transaction() as conn:
         sql = ("SELECT l.*, i.name AS item_name FROM inventory_lot l"
                " JOIN inventory_item i ON i.item_code = l.item_code")
@@ -356,7 +549,8 @@ def lots(item_code: str | None = None) -> list[dict]:
 
 
 @app.patch("/api/lots/{lot_id}")
-def update_lot(lot_id: int, payload: LotPatch) -> dict:
+def update_lot(lot_id: int, payload: LotPatch,
+               user: dict = Depends(requires("lot.edit"))) -> dict:
     """Correct a receiving line.
 
     Required by US-1 ("事後發現數量登錯可修正，但寫入 audit_log，不可靜默改").
@@ -398,7 +592,7 @@ def update_lot(lot_id: int, payload: LotPatch) -> dict:
             " AND status IN ('posted','overridden')", (lot_id,)).fetchone()["n"]
         conn.execute(f"UPDATE inventory_lot SET {', '.join(f'{k} = ?' for k in changes)}"
                      " WHERE id = ?", (*changes.values(), lot_id))
-        log(conn, payload.actor, "lot.update", {
+        log(conn, user["name"], "lot.update", {
             "lot_id": lot_id,
             "before": {k: before[k] for k in changes},
             "after": changes,
@@ -408,7 +602,7 @@ def update_lot(lot_id: int, payload: LotPatch) -> dict:
 
 
 @app.delete("/api/lots/{lot_id}")
-def delete_lot(lot_id: int, actor: str = "admin") -> dict:
+def delete_lot(lot_id: int, user: dict = Depends(requires("lot.delete"))) -> dict:
     """Delete a receiving line — only while nothing has been drawn from it.
 
     A lot that has been issued from is referenced by usage records. Deleting it
@@ -431,7 +625,7 @@ def delete_lot(lot_id: int, actor: str = "admin") -> dict:
                 " 要讓它退出流通請把在庫數量改成 0。",
             )
         conn.execute("DELETE FROM inventory_lot WHERE id = ?", (lot_id,))
-        log(conn, actor, "lot.delete", {
+        log(conn, user["name"], "lot.delete", {
             "lot_id": lot_id,
             "deleted": {k: row[k] for k in ("item_code", "receipt_date", "manufacture_date",
                                             "qty_on_hand", "supplier", "verdict")},
@@ -440,7 +634,7 @@ def delete_lot(lot_id: int, actor: str = "admin") -> dict:
 
 
 @app.post("/api/lots")
-def create_lot(payload: LotIn) -> dict:
+def create_lot(payload: LotIn, user: dict = Depends(requires("lot.create"))) -> dict:
     """US-1 receiving. A future receipt date is almost always a typo, so it is refused."""
     parsed = to_date_key(payload.receipt_date)
     if parsed is None or parsed.iso is None:
@@ -472,7 +666,7 @@ def create_lot(payload: LotIn) -> dict:
                  payload.supplier_code, payload.supplier),
             )
             created_item = True
-            log(conn, DEMO_USER, "item.create", {"item_code": item_code, "name": payload.item_name})
+            log(conn, user["name"], "item.create", {"item_code": item_code, "name": payload.item_name})
         elif payload.item_name or payload.shelf_life_days is not None or payload.safety_stock:
             # Receiving is also when someone notices the master data is wrong.
             # Let them fix it in place, but never silently — it hits audit_log.
@@ -490,7 +684,7 @@ def create_lot(payload: LotIn) -> dict:
             if updates:
                 conn.execute(f"UPDATE inventory_item SET {', '.join(updates)} WHERE item_code = ?",
                              (*params, item_code))
-                log(conn, DEMO_USER, "item.update", {"item_code": item_code, "changed": updates})
+                log(conn, user["name"], "item.update", {"item_code": item_code, "changed": updates})
         # One delivery can arrive as several manufacture-date batches, and the form
         # records them as separate lines — so same 型號 + same receipt date is
         # NORMAL, not a duplicate. Only an identical manufacture date makes it
@@ -529,13 +723,16 @@ def create_lot(payload: LotIn) -> dict:
              expiry.iso if expiry else None, payload.supplier_lot_code, payload.supplier,
              payload.qty_meters, payload.entered_unit,
              json.dumps(payload.inspection, ensure_ascii=False), payload.verdict,
-             payload.recorded_by, payload.confirmed_by, payload.remark, qty, now(), DEMO_USER),
+             # 記錄人 is who is signed in, not a name picked from a list. Dual
+             # sign-off is the form's control point; a dropdown of names lets
+             # anyone sign as anyone and the control means nothing.
+             user["name"], payload.confirmed_by, payload.remark, qty, now(), user["name"]),
         )
         lot_id = cursor.lastrowid
-        log(conn, DEMO_USER, "lot.create",
+        log(conn, user["name"], "lot.create",
             {"lot_id": lot_id, "item_code": item_code, "receipt_date": parsed.iso, "qty": qty,
              "entered": payload.qty_meters, "verdict": payload.verdict,
-             "recorded_by": payload.recorded_by, "confirmed_by": payload.confirmed_by})
+             "recorded_by": user["name"], "confirmed_by": payload.confirmed_by})
     return {
         "id": lot_id,
         "receipt_date": parsed.iso,
@@ -545,9 +742,9 @@ def create_lot(payload: LotIn) -> dict:
         # Dual sign-off exists so one person cannot both book and approve. Same
         # name in both boxes is reported, not blocked — blocking would just get
         # a second name borrowed, and then the record lies (cf. risk R2).
+        "recorded_by": user["name"],
         "same_signer": bool(
-            payload.recorded_by and payload.confirmed_by
-            and payload.recorded_by.strip() == payload.confirmed_by.strip()
+            payload.confirmed_by and payload.confirmed_by.strip() == user["name"]
         ),
         # Surfaced, never rounded away: metres that do not divide into whole
         # boxes are a real discrepancy the warehouse should see (units.py).
@@ -561,7 +758,8 @@ def create_lot(payload: LotIn) -> dict:
 # --------------------------------------------------------------------------- recognition
 
 @app.post("/api/recognize")
-async def recognize(image: UploadFile = File(...), item_code: str | None = Form(default=None)) -> dict:
+async def recognize(image: UploadFile = File(...), item_code: str | None = Form(default=None),
+                    user: dict = Depends(requires("issue.create"))) -> dict:
     """Recognise a box: which 型號 it is, and which lot.
 
     Both identifications come from the photo. The operator picks a 型號 only
@@ -684,7 +882,7 @@ class ResolveIn(BaseModel):
 
 
 @app.post("/api/resolve-item")
-def resolve_item(payload: ResolveIn) -> dict:
+def resolve_item(payload: ResolveIn, user: dict = Depends(requires("issue.create"))) -> dict:
     """Re-run the lot match after a human picks the 型號 recognition could not.
 
     Deliberately does not touch the image: recognition already ran and is
@@ -701,7 +899,7 @@ def resolve_item(payload: ResolveIn) -> dict:
 # --------------------------------------------------------------------------- issuing
 
 @app.post("/api/scans")
-def create_scan(payload: ScanIn) -> dict:
+def create_scan(payload: ScanIn, user: dict = Depends(requires("issue.create"))) -> dict:
     """Record the draw. Always.
 
     A FIFO violation writes a complete record and moves no stock. It is not an
@@ -714,8 +912,8 @@ def create_scan(payload: ScanIn) -> dict:
 
         if payload.lot_id is None:
             scan_id = _insert_scan(conn, payload, status="blocked_unreadable", lot_id=None,
-                                   fifo_expected=(None, None))
-            log(conn, DEMO_USER, "scan.blocked_unreadable", {"scan_id": scan_id})
+                                   fifo_expected=(None, None), user=user)
+            log(conn, user["name"], "scan.blocked_unreadable", {"scan_id": scan_id})
             return {"id": scan_id, "status": "blocked_unreadable"}
 
         lot = conn.execute("SELECT * FROM inventory_lot WHERE id = ?", (payload.lot_id,)).fetchone()
@@ -730,29 +928,29 @@ def create_scan(payload: ScanIn) -> dict:
 
         if not ok:
             scan_id = _insert_scan(conn, payload, status="blocked_fifo", lot_id=payload.lot_id,
-                                   fifo_expected=(expected_id, expected_date))
-            log(conn, DEMO_USER, "scan.blocked_fifo",
+                                   fifo_expected=(expected_id, expected_date), user=user)
+            log(conn, user["name"], "scan.blocked_fifo",
                 {"scan_id": scan_id, "took_lot": payload.lot_id, "expected_lot": expected_id})
             return {"id": scan_id, "status": "blocked_fifo",
                     "fifo_expected_lot_id": expected_id, "fifo_expected_date": expected_date}
 
         # Stock movement and record, one transaction (US-2).
         scan_id = _insert_scan(conn, payload, status="posted", lot_id=payload.lot_id,
-                               fifo_expected=(expected_id, expected_date))
+                               fifo_expected=(expected_id, expected_date), user=user)
         conn.execute("UPDATE inventory_lot SET qty_on_hand = qty_on_hand - 1 WHERE id = ? AND qty_on_hand > 0",
                      (payload.lot_id,))
-        log(conn, DEMO_USER, "scan.posted", {"scan_id": scan_id, "lot_id": payload.lot_id})
+        log(conn, user["name"], "scan.posted", {"scan_id": scan_id, "lot_id": payload.lot_id})
         return {"id": scan_id, "status": "posted"}
 
 
 def _insert_scan(conn, payload: ScanIn, *, status: str, lot_id: int | None,
-                 fifo_expected: tuple[int | None, str | None]) -> int:
+                 fifo_expected: tuple[int | None, str | None], user: dict) -> int:
     cursor = conn.execute(
         "INSERT INTO material_usage_scan (item_code, lot_id, status, captured_at, captured_by,"
         " image_path, ocr_receipt_date, ocr_confidence, ocr_notes, match_distance,"
         " fifo_expected_lot_id, fifo_expected_date, field_values, detail_pending, created_at)"
         " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (payload.item_code, lot_id, status, now(), DEMO_USER, payload.image_path,
+        (payload.item_code, lot_id, status, now(), user["name"], payload.image_path,
          payload.ocr_receipt_date, payload.ocr_confidence, payload.ocr_notes, payload.match_distance,
          fifo_expected[0], fifo_expected[1], json.dumps(payload.fields, ensure_ascii=False),
          int(payload.detail_pending), now()),
@@ -761,7 +959,8 @@ def _insert_scan(conn, payload: ScanIn, *, status: str, lot_id: int | None,
 
 
 @app.get("/api/scans")
-def scans(status: str | None = None, limit: int = 100) -> list[dict]:
+def scans(status: str | None = None, limit: int = 100,
+          user: dict = Depends(current_user)) -> list[dict]:
     with transaction() as conn:
         sql = ("SELECT s.*, l.receipt_date, l.manufacture_date, i.name AS item_name"
                " FROM material_usage_scan s"
@@ -777,7 +976,8 @@ def scans(status: str | None = None, limit: int = 100) -> list[dict]:
 
 
 @app.post("/api/scans/{scan_id}/override")
-def override(scan_id: int, payload: OverrideIn) -> dict:
+def override(scan_id: int, payload: OverrideIn,
+             user: dict = Depends(requires("scan.override"))) -> dict:
     """US-5. Without this the floor learns to stop photographing boxes entirely."""
     if not payload.reason.strip():
         raise HTTPException(400, "覆核必須填原因")
@@ -789,7 +989,7 @@ def override(scan_id: int, payload: OverrideIn) -> dict:
             raise HTTPException(409, f"只有 blocked_fifo 可覆核，目前為 {row['status']}")
         conn.execute(
             "UPDATE material_usage_scan SET status = 'overridden', override_by = ?, override_reason = ?"
-            " WHERE id = ?", (payload.actor, payload.reason, scan_id))
+            " WHERE id = ?", (user["name"], payload.reason, scan_id))
         conn.execute("UPDATE inventory_lot SET qty_on_hand = qty_on_hand - 1"
                      " WHERE id = ? AND qty_on_hand > 0", (row["lot_id"],))
         log(conn, payload.actor, "scan.overridden", {"scan_id": scan_id, "reason": payload.reason})
@@ -797,7 +997,8 @@ def override(scan_id: int, payload: OverrideIn) -> dict:
 
 
 @app.get("/api/audit")
-def audit(limit: int = 200, action: str | None = None) -> list[dict]:
+def audit(limit: int = 200, action: str | None = None,
+          user: dict = Depends(requires("audit.read"))) -> list[dict]:
     """The change trail.
 
     US-1 requires corrections to be recorded rather than silent. A trail nobody
@@ -818,7 +1019,8 @@ def audit(limit: int = 200, action: str | None = None) -> list[dict]:
 # --------------------------------------------------------------------------- traceability & alerts
 
 @app.get("/api/trace")
-def trace(lot_id: int | None = None, packed_product: str | None = None) -> dict:
+def trace(lot_id: int | None = None, packed_product: str | None = None,
+          user: dict = Depends(current_user)) -> dict:
     """US-7. Blocked records appear here too — the film may physically have been used."""
     with transaction() as conn:
         sql = ("SELECT s.*, l.receipt_date, l.manufacture_date FROM material_usage_scan s"
@@ -837,7 +1039,7 @@ def trace(lot_id: int | None = None, packed_product: str | None = None) -> dict:
 
 
 @app.get("/api/alerts")
-def alerts() -> dict:
+def alerts(user: dict = Depends(current_user)) -> dict:
     """US-8 plus the pending-detail reminder from US-6.
 
     An empty result still reports a timestamp: a blank panel cannot distinguish

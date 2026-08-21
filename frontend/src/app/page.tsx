@@ -23,12 +23,13 @@
 import { ArrowRightOutlined, PlusOutlined } from "@ant-design/icons";
 import {
   Alert, Button, Card, Checkbox, Col, DatePicker, Divider, Empty, Form, Input,
-  InputNumber, Modal, Popconfirm, Radio, Row, Segmented, Space, Table, Tag,
+  InputNumber, Modal, Popconfirm, Radio, Row, Segmented, Select, Space, Table, Tag,
   Tooltip, Typography, message,
 } from "antd";
 import dayjs from "dayjs";
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
+import { useAuth } from "@/components/AuthGate";
 import CreatableSelect from "@/components/CreatableSelect";
 import { api, type Dictionary, type Item, type Lot } from "@/lib/api";
 
@@ -46,6 +47,11 @@ export default function ReceivingPage() {
   const [busy, setBusy] = useState(false);
   const [enteredCount, setEnteredCount] = useState(0);
   const [editing, setEditing] = useState<Lot | null>(null);
+  const { user, can } = useAuth();
+  const [roster, setRoster] = useState<{ name: string; role_label: string }[]>([]);
+  useEffect(() => {
+    api.signers().then(setRoster).catch(() => undefined);
+  }, []);
   const [editForm] = Form.useForm();
   const [knownCode, setKnownCode] = useState(false);
   // Metres is the default: the acceptance form records quantity in metres, so
@@ -56,9 +62,8 @@ export default function ReceivingPage() {
   const metres = Form.useWatch("qty_meters", form) as number | undefined;
   const chosenCode = (Form.useWatch("item_code", form) as string | undefined)?.trim();
   const verdict = Form.useWatch("verdict", form) as string | undefined;
-  const recordedBy = (Form.useWatch("recorded_by", form) as string | undefined)?.trim();
   const confirmedBy = (Form.useWatch("confirmed_by", form) as string | undefined)?.trim();
-  const sameSigner = Boolean(recordedBy && confirmedBy && recordedBy === confirmedBy);
+  const sameSigner = Boolean(confirmedBy && confirmedBy === user?.name);
 
   // Preview only — the server does the authoritative conversion. Shown live so
   // the remainder is visible before submitting, not discovered afterwards.
@@ -90,11 +95,14 @@ export default function ReceivingPage() {
   const suppliers = dictValues("supplier");
   const materialNames = dictValues("material_name");
   const specs = dictValues("spec");
-  const signers = dictValues("staff");
   const byCode = new Map(items.map((i) => [i.item_code, i]));
 
+  // A 型號 IS a supplier's material at a spec — T7320BC is 臺灣希悅爾's
+  // 高阻氧拉伸膜 340mm x 900M. Letting someone pick those three separately allows
+  // combinations that do not exist, so choosing the 型號 fills them in and they
+  // become read-only. They are only editable while defining a NEW 型號.
   function onCodeChange(value: string) {
-    const found = items.find((i) => i.item_code === value.trim());
+    const found = items.find((i) => i.item_code === (value ?? "").trim());
     setKnownCode(Boolean(found));
     if (found) {
       form.setFieldsValue({
@@ -104,7 +112,12 @@ export default function ReceivingPage() {
         safety_stock: found.safety_stock,
         meters_per_box: found.meters_per_box,
         supplier_code: found.supplier_code,
-        supplier: found.supplier ?? form.getFieldValue("supplier"),
+        supplier: found.supplier,
+      });
+    } else {
+      form.setFieldsValue({
+        item_name: undefined, spec: undefined, supplier: undefined,
+        meters_per_box: undefined, supplier_code: undefined,
       });
     }
   }
@@ -129,7 +142,6 @@ export default function ReceivingPage() {
           INSPECTION.map((k) => [k, (values.inspection ?? []).includes(k)]),
         ),
         verdict: values.verdict ?? null,
-        recorded_by: values.recorded_by || null,
         confirmed_by: values.confirmed_by || null,
         remark: values.remark || null,
         supplier_lot_code: values.supplier_lot_code || null,
@@ -253,9 +265,14 @@ export default function ReceivingPage() {
               <Form.Item
                 name="supplier"
                 label="廠商名稱"
-                extra={enteredCount > 0 ? "沿用上一批" : undefined}
+                extra={knownCode ? "由型號決定" : "新型號才需要填"}
               >
-                <CreatableSelect options={suppliers} placeholder="選廠商" addLabel="新增廠商" category="supplier" onAdded={load} />
+                {knownCode ? (
+                  <Input disabled />
+                ) : (
+                  <CreatableSelect options={suppliers} placeholder="選廠商" addLabel="新增廠商"
+                                   category="supplier" onAdded={load} />
+                )}
               </Form.Item>
             </Col>
             <Col xs={24} md={6}>
@@ -263,14 +280,14 @@ export default function ReceivingPage() {
                 name="item_name"
                 label="原物料名稱"
                 rules={[{ required: !knownCode, message: "新型號請填原物料名稱" }]}
+                extra={knownCode ? "由型號決定" : undefined}
               >
-                <CreatableSelect
-                  options={materialNames}
-                  placeholder="選原物料名稱"
-                  addLabel="新增名稱"
-                  category="material_name"
-                  onAdded={load}
-                />
+                {knownCode ? (
+                  <Input disabled />
+                ) : (
+                  <CreatableSelect options={materialNames} placeholder="選原物料名稱"
+                                   addLabel="新增名稱" category="material_name" onAdded={load} />
+                )}
               </Form.Item>
             </Col>
             <Col xs={24} md={6}>
@@ -336,8 +353,13 @@ export default function ReceivingPage() {
               </Form.Item>
             </Col>
             <Col xs={24} md={6}>
-              <Form.Item name="spec" label="規格">
-                <CreatableSelect options={specs} placeholder="選規格" addLabel="新增規格" category="spec" onAdded={load} />
+              <Form.Item name="spec" label="規格" extra={knownCode ? "由型號決定" : undefined}>
+                {knownCode ? (
+                  <Input disabled />
+                ) : (
+                  <CreatableSelect options={specs} placeholder="選規格" addLabel="新增規格"
+                                   category="spec" onAdded={load} />
+                )}
               </Form.Item>
             </Col>
             <Col xs={24} md={6}>
@@ -395,8 +417,11 @@ export default function ReceivingPage() {
 
           <Row gutter={24}>
             <Col xs={24} md={6}>
-              <Form.Item name="recorded_by" label="記錄人">
-                <CreatableSelect options={signers} placeholder="選填單的人" addLabel="新增人員" category="staff" onAdded={load} />
+              <Form.Item label="記錄人">
+                {/* Not a field. Signing as whoever is logged in is the whole
+                    point — a dropdown of names lets anyone sign as anyone, and
+                    then dual sign-off controls nothing. */}
+                <Input value={user?.name ?? ""} disabled suffix={<Text type="secondary">登入身分</Text>} />
               </Form.Item>
             </Col>
             <Col xs={24} md={6}>
@@ -404,9 +429,15 @@ export default function ReceivingPage() {
                 name="confirmed_by"
                 label="確認人"
                 validateStatus={sameSigner ? "warning" : undefined}
-                help={sameSigner ? "跟記錄人同一個人" : undefined}
+                help={sameSigner ? "跟記錄人是同一個人" : undefined}
               >
-                <CreatableSelect options={signers} placeholder="選覆核的人" addLabel="新增人員" category="staff" onAdded={load} />
+                <Select
+                  allowClear
+                  placeholder="選覆核的人"
+                  options={roster
+                    .filter((r) => r.name !== user?.name)
+                    .map((r) => ({ value: r.name, label: `${r.name}（${r.role_label}）` }))}
+                />
               </Form.Item>
             </Col>
           </Row>
@@ -528,6 +559,7 @@ export default function ReceivingPage() {
             {
               title: "管理",
               width: 130,
+              hidden: !can("lot.edit") && !can("lot.delete"),
               render: (_, row: Lot) => (
                 <Space size={4}>
                   <Button
