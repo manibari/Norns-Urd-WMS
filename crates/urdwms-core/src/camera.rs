@@ -166,8 +166,7 @@ pub fn capture(config: &CameraConfig) -> Result<Frame, CameraError> {
 }
 
 fn capture_http(config: &CameraConfig) -> Result<Vec<u8>, CameraError> {
-    let agent: ureq::Agent =
-        ureq::Agent::config_builder().timeout_global(Some(config.timeout())).http_status_as_error(false).build().into();
+    let agent = crate::http_agent(config.timeout());
     let mut request = agent.get(&config.url());
     if !config.username.is_empty() {
         let token =

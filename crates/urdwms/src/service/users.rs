@@ -44,6 +44,7 @@ pub fn login(store: &Store, username: &str, password: &str) -> Res<Session> {
         _ => bail!("帳號或密碼不正確"),
     }
     let session = session_for(conn, &username)?;
+    crate::applog::info(format!("登入 {}（{}）", session.username, session.role));
     log(conn, &session.name, "auth.login", json!({"role": session.role, "username": session.username}))?;
     Ok(session)
 }

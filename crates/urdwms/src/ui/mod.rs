@@ -132,12 +132,18 @@ pub struct Shared {
 
 impl Shared {
     pub fn toast(&mut self, kind: Kind, text: impl Into<String>) {
+        let text = text.into();
+        match kind {
+            Kind::Error => crate::applog::error(&text),
+            Kind::Warning => crate::applog::warn(&text),
+            _ => {}
+        }
         let secs = match kind {
             Kind::Success | Kind::Info => 4,
             Kind::Warning => 8,
             Kind::Error => 10,
         };
-        self.toasts.push(Toast { kind, text: text.into(), until: Instant::now() + Duration::from_secs(secs) });
+        self.toasts.push(Toast { kind, text, until: Instant::now() + Duration::from_secs(secs) });
     }
 
     pub fn ok(&mut self, text: impl Into<String>) {

@@ -94,7 +94,14 @@ impl IssuePage {
     fn fire_trigger(&mut self, ctx: &egui::Context) {
         self.start_waiting();
         let config = self.camera.clone();
-        self.trigger = Task::spawn(ctx, move || camera::send_trigger(&config).map_err(|e| e.to_string()));
+        self.trigger = Task::spawn(ctx, move || {
+            let result = camera::send_trigger(&config).map_err(|e| e.to_string());
+            match &result {
+                Ok(reply) => crate::applog::info(format!("觸發 {}:{} 回覆 {reply:?}", config.host, config.port)),
+                Err(e) => crate::applog::error(format!("觸發失敗：{e}")),
+            }
+            result
+        });
     }
 
     fn network_source(&self) -> bool {
@@ -1044,9 +1051,16 @@ fn capture_and_recognise(data_dir: &std::path::Path, config: &CameraConfig, sour
     let failed = |e: AppError| CaptureFailure::Failed(e.0);
     let (bytes, info, suffix) = match source {
         Source::Camera => match camera::capture(config) {
-            Ok(frame) => (frame.data, frame.source, "-cam"),
+            Ok(frame) => {
+                let name = frame.source.as_ref().map(|s| s.name.clone()).unwrap_or_default();
+                crate::applog::info(format!("擷取 {} {name}（{} KB）", config.endpoint(), frame.data.len() / 1024));
+                (frame.data, frame.source, "-cam")
+            }
             Err(CameraError::Stale { .. }) => return Err(CaptureFailure::Stale),
-            Err(e) => return Err(CaptureFailure::Failed(e.to_string())),
+            Err(e) => {
+                crate::applog::error(format!("擷取失敗 {}：{e}", config.endpoint()));
+                return Err(CaptureFailure::Failed(e.to_string()));
+            }
         },
         Source::File(path) => match std::fs::read(&path) {
             Ok(b) => (b, None, ""),
@@ -1055,7 +1069,25 @@ fn capture_and_recognise(data_dir: &std::path::Path, config: &CameraConfig, sour
     };
     let store = Store::open(data_dir).map_err(failed)?;
     let provider = service::provider(&store.conn);
+    let model = service::recognition_model(&store.conn);
     let mut proposal = service::recognise_and_store(&store, provider.as_ref(), &bytes, suffix).map_err(failed)?;
+    let r = &proposal.recognition;
+    match &r.error {
+        Some(e) => crate::applog::error(format!("辨識失敗（{model}，{} ms）：{e}", proposal.timing_ms)),
+        None => crate::applog::info(format!(
+            "辨識（{model}，{} ms，{}+{} tokens）型號 {:?} 料號 {:?} 製造 {:?} 章 {:?} → 品項 {:?} 判定 {} {:?}",
+            proposal.timing_ms,
+            r.input_tokens,
+            r.output_tokens,
+            r.model_code,
+            r.item_code,
+            r.manufacture_date,
+            r.receipt_date,
+            proposal.item_id,
+            proposal.decision,
+            proposal.defer_reason
+        )),
+    }
     if let Some(info) = info {
         proposal.source_name = Some(info.name);
         proposal.source_time = Some(info.time);

@@ -128,6 +128,10 @@ pub struct GeminiProvider {
     thinking: bool,
 }
 
+/// Long enough for a slow model, short enough that an operator holding a box
+/// is not left staring at a spinner — after this the flow drops to manual.
+const TIMEOUT: Duration = Duration::from_secs(60);
+
 pub const DEFAULT_MODEL: &str = "gemini-3.7-flash";
 const ENDPOINT: &str = "https://generativelanguage.googleapis.com/v1beta/models";
 
@@ -136,11 +140,7 @@ impl GeminiProvider {
     /// handshake every time, and most of the wait was that, not the model
     /// (~7s warm against ~23s cold, measured).
     pub fn new(api_key: impl Into<String>, model: impl Into<String>) -> Self {
-        let agent = ureq::Agent::config_builder()
-            .timeout_global(Some(Duration::from_secs(120)))
-            .http_status_as_error(false)
-            .build()
-            .into();
+        let agent = crate::http_agent(TIMEOUT);
         GeminiProvider { agent, api_key: api_key.into(), model: model.into(), thinking: true }
     }
 
@@ -222,6 +222,28 @@ pub fn parse_response(body: &Value) -> Recognition {
     reading
 }
 
+impl GeminiProvider {
+    /// A one-word request: proves the key, the model name and the network path
+    /// in a second or two, without spending an image.
+    pub fn check(&self) -> Result<String, String> {
+        let url = format!("{ENDPOINT}/{}:generateContent", self.model);
+        let body = json!({"contents": [{"parts": [{"text": "Reply with OK."}]}]});
+        let started = std::time::Instant::now();
+        let mut response = self
+            .agent
+            .post(&url)
+            .header("x-goog-api-key", &self.api_key)
+            .send_json(body)
+            .map_err(|e| format!("連不到辨識服務 — {e}"))?;
+        let status = response.status().as_u16();
+        let body: Value = response.body_mut().read_json().map_err(|e| format!("HTTP {status}，回應無法解讀 — {e}"))?;
+        if let Some(message) = body.pointer("/error/message").and_then(Value::as_str) {
+            return Err(format!("HTTP {status}：{message}"));
+        }
+        Ok(format!("金鑰可用，模型 {} 回應正常（{} ms）", self.model, started.elapsed().as_millis()))
+    }
+}
+
 impl RecognitionProvider for GeminiProvider {
     fn recognize(&self, image: &[u8]) -> Recognition {
         let url = format!("{ENDPOINT}/{}:generateContent", self.model);
@@ -230,6 +252,13 @@ impl RecognitionProvider for GeminiProvider {
         // result and the screen drops into manual selection.
         let mut response = match result {
             Ok(r) => r,
+            Err(ureq::Error::Timeout(_)) => {
+                return Recognition::failed(format!(
+                    "辨識服務 {} 秒沒有回應（模型 {}）",
+                    TIMEOUT.as_secs(),
+                    self.model
+                ));
+            }
             Err(e) => return Recognition::failed(format!("連不到辨識服務 — {e}")),
         };
         let status = response.status().as_u16();

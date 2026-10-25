@@ -5,6 +5,7 @@
 
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+mod applog;
 mod auth;
 mod db;
 mod error;
@@ -79,6 +80,7 @@ fn install_panic_log(dir: PathBuf) {
             .append(true)
             .open(dir.join("crash.log"))
             .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
+        applog::error(format!("程式異常：{info}"));
         default(info);
     }));
 }
@@ -127,6 +129,14 @@ fn main() {
         fail(&format!("無法建立資料夾 {}：{e}", args.data_dir.display()));
     }
     install_panic_log(args.data_dir.clone());
+    applog::init(&args.data_dir);
+    applog::info(format!(
+        "啟動 urdwms {}（{} {}），資料位置 {}",
+        env!("CARGO_PKG_VERSION"),
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+        args.data_dir.display()
+    ));
     let store = service::Store::open(&args.data_dir).unwrap_or_else(|e| fail(&format!("無法開啟資料庫：{e}")));
     if args.demo {
         match seed::demo(&store.conn) {
@@ -163,6 +173,7 @@ fn main() {
         Box::new(move |cc| Ok(Box::new(ui::App::new(cc, store, data_dir, first_run, auto_login, screenshots)))),
     );
     if let Err(e) = result {
+        applog::error(format!("無法啟動畫面：{e}"));
         fail(&format!("無法啟動畫面（顯示卡驅動不支援 OpenGL 2.0？）：{e}"));
     }
 }

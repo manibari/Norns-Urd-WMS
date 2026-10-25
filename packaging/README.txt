@@ -27,10 +27,11 @@ Urd-WMS 包材批次管理 —— Windows 版
 
 資料放在哪
 ----------
-預設 %LOCALAPPDATA%\UrdWMS\
+預設 %LOCALAPPDATA%\UrdWMS\（系統設定頁上方有「開啟資料夾」「看日誌」）
   urdwms.db   資料庫（SQLite）
   uploads\    領用照片（追溯用，請勿刪除）
-  crash.log   程式異常時的紀錄（回報問題時請附上）
+  urdwms.log  運作日誌：每次辨識、相機擷取、畫面上跳過的錯誤（回報問題時請附上）
+  crash.log   程式當掉時的紀錄
 
 備份：關掉程式後複製整個 UrdWMS 資料夾即可。
 要放到別的位置：Urd-WMS.exe --data-dir D:\UrdWMS（可建立捷徑帶這個參數）

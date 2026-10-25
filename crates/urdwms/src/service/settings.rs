@@ -115,6 +115,7 @@ pub fn api_key(conn: &Connection) -> Option<String> {
     ["GEMINI_API_KEY", "GOOGLE_API_KEY"]
         .iter()
         .find_map(|k| std::env::var(k).ok().filter(|v| !v.trim().is_empty()))
+        .map(|k| k.trim().to_string())
         .or_else(|| read::<String>(conn, API_KEY).ok().flatten().filter(|v| !v.is_empty()))
 }
 
@@ -125,8 +126,12 @@ pub fn api_key_from_env() -> bool {
 pub fn save_api_key(store: &Store, user: &Session, key: &str) -> Res<()> {
     let conn = &store.conn;
     user.require(conn, "dictionary.manage")?;
-    write(conn, API_KEY, &key.trim().to_string(), &user.name)?;
-    log(conn, &user.name, "setting.api_key", json!({"set": !key.trim().is_empty()}))?;
+    // Keys are plain ASCII. A paste from a chat or PDF can carry a zero-width
+    // or non-breaking character that is invisible on screen and turns the key
+    // into "API key not valid".
+    let key: String = key.chars().filter(|c| c.is_ascii_graphic()).collect();
+    write(conn, API_KEY, &key, &user.name)?;
+    log(conn, &user.name, "setting.api_key", json!({"set": !key.is_empty()}))?;
     Ok(())
 }
 

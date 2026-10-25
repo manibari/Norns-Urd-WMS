@@ -73,6 +73,8 @@ pub struct SettingsPage {
     api_key_set: bool,
     camera: Option<CameraForm>,
     test: Task<TestResult>,
+    key_test: Task<Result<String, String>>,
+    key_result: Option<Result<String, String>>,
     result: Option<(bool, String)>,
     preview: Option<egui::TextureHandle>,
     thresholds: [String; 3],
@@ -114,6 +116,13 @@ impl SettingsPage {
         if self.loaded != Some(shared.generation) {
             self.load(shared, user);
         }
+        if let Some(r) = self.key_test.poll() {
+            match &r {
+                Ok(m) => crate::applog::info(format!("測試金鑰：{m}")),
+                Err(e) => crate::applog::error(format!("測試金鑰失敗：{e}")),
+            }
+            self.key_result = Some(r);
+        }
         if let Some(r) = self.test.poll() {
             self.preview = r.image.map(|img| ui.ctx().load_texture("camera-test", img, egui::TextureOptions::LINEAR));
             self.result = Some((r.ok, r.text));
@@ -150,6 +159,17 @@ impl SettingsPage {
                     }
                 });
                 divider(ui);
+                if let Some(log) = crate::applog::path() {
+                    ui.horizontal(|ui| {
+                        ui.label(small(format!("資料、照片與日誌：{}", shared.data_dir.display())));
+                        if link(ui, "開啟資料夾").clicked() {
+                            open_folder(&shared.data_dir);
+                        }
+                        if link(ui, "看日誌").clicked() {
+                            open_folder(&log);
+                        }
+                    });
+                }
                 match self.tab {
                     0 => self.vision(ui, shared, user),
                     1 => self.alerts(ui, shared, user),
@@ -183,7 +203,7 @@ impl SettingsPage {
         ui.add_space(10.0);
         ui.label(RichText::new("辨識 API 金鑰（Google Gemini）").font(bold_font(17.0)));
         if service::api_key_from_env() {
-            ui.label(muted("目前使用環境變數 GEMINI_API_KEY 的金鑰。"));
+            ui.label(muted("目前使用 Windows 環境變數 GEMINI_API_KEY 的金鑰（優先於這裡輸入的）。若測試失敗，請檢查或刪除那個環境變數。"));
         } else {
             ui.horizontal(|ui| {
                 password_input(
@@ -209,6 +229,28 @@ impl SettingsPage {
             }));
         }
 
+        ui.horizontal(|ui| {
+            let typed = self.api_key.trim().to_string();
+            let key = if typed.is_empty() { service::api_key(&shared.store.conn) } else { Some(typed) };
+            let enabled = key.is_some() && !self.key_test.running();
+            if ui.add_enabled(enabled, egui::Button::new("測試金鑰").min_size(Vec2::new(110.0, 40.0))).clicked()
+                && let Some(key) = key
+            {
+                let model = self.model.clone();
+                self.key_result = None;
+                self.key_test =
+                    Task::spawn(ui.ctx(), move || urdwms_core::recognition::GeminiProvider::new(key, model).check());
+            }
+            if self.key_test.running() {
+                ui.spinner();
+            }
+            ui.label(small("送一個字給目前選的模型，確認金鑰、模型名稱和網路都通"));
+        });
+        match &self.key_result {
+            Some(Ok(m)) => alert(ui, Kind::Success, "辨識服務正常", m),
+            Some(Err(e)) => alert(ui, Kind::Error, "辨識服務無法使用", e),
+            None => {}
+        }
         ui.add_space(14.0);
         ui.label(RichText::new("影像來源").font(bold_font(17.0)));
         alert(
@@ -637,6 +679,17 @@ impl SettingsPage {
 }
 
 fn run_test(config: &CameraConfig) -> TestResult {
+    let result = run_test_inner(config);
+    let line = format!("測試相機 {}：{}", config.endpoint(), result.text);
+    if result.ok {
+        crate::applog::info(line)
+    } else {
+        crate::applog::warn(line)
+    }
+    result
+}
+
+fn run_test_inner(config: &CameraConfig) -> TestResult {
     let started = Instant::now();
     match camera::capture(config) {
         Ok(frame) => {
@@ -665,4 +718,12 @@ fn run_test(config: &CameraConfig) -> TestResult {
         }
         Err(e) => TestResult { ok: false, text: e.to_string(), image: None },
     }
+}
+
+/// Show a folder (or file) in Explorer.
+fn open_folder(path: &std::path::Path) {
+    #[cfg(windows)]
+    let _ = std::process::Command::new("explorer").arg(path).spawn();
+    #[cfg(not(windows))]
+    let _ = std::process::Command::new("xdg-open").arg(path).spawn();
 }
