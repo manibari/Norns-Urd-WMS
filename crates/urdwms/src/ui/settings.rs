@@ -71,6 +71,7 @@ pub struct SettingsPage {
     model: String,
     api_key: String,
     api_key_set: bool,
+    show_key: bool,
     camera: Option<CameraForm>,
     test: Task<TestResult>,
     key_test: Task<Result<String, String>>,
@@ -206,12 +207,22 @@ impl SettingsPage {
             ui.label(muted("目前使用 Windows 環境變數 GEMINI_API_KEY 的金鑰（優先於這裡輸入的）。若測試失敗，請檢查或刪除那個環境變數。"));
         } else {
             ui.horizontal(|ui| {
-                password_input(
-                    ui,
-                    &mut self.api_key,
-                    if self.api_key_set { "已設定，輸入新的會取代" } else { "貼上金鑰" },
-                    380.0,
-                );
+                let hint = if self.api_key_set {
+                    "已設定，貼上新的會取代"
+                } else {
+                    "貼上金鑰（Ctrl+V 或長按貼上）"
+                };
+                if self.show_key {
+                    text_input(ui, &mut self.api_key, hint, 380.0);
+                } else {
+                    password_input(ui, &mut self.api_key, hint, 380.0);
+                }
+                if ui
+                    .add(egui::Button::new(if self.show_key { "隱藏" } else { "顯示" }).min_size(Vec2::new(70.0, 34.0)))
+                    .clicked()
+                {
+                    self.show_key = !self.show_key;
+                }
                 if primary(ui, "儲存金鑰").clicked() && !self.api_key.trim().is_empty() {
                     let key = self.api_key.clone();
                     if shared.act(service::save_api_key(&shared.store, user, &key), Some("已儲存金鑰")).is_some() {
