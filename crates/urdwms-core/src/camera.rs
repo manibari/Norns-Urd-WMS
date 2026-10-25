@@ -241,6 +241,40 @@ fn capture_raw(config: &CameraConfig) -> Result<Vec<u8>, CameraError> {
     validate(data, config)
 }
 
+/// Ask a camera to take a picture over its TCP command port, and return
+/// whatever it answers within a moment (smart cameras reply with their own
+/// result string). Used with the folder source: the trigger goes over TCP,
+/// the photo arrives in the folder the vendor software saves to.
+pub fn send_trigger(config: &CameraConfig) -> Result<Option<String>, CameraError> {
+    if config.host.is_empty() || config.trigger.is_empty() {
+        return fail("尚未設定觸發位址或觸發字串");
+    }
+    let addr = format!("{}:{}", config.host, config.port);
+    let sockaddr = match addr.to_socket_addrs().map(|mut a| a.next()) {
+        Ok(Some(a)) => a,
+        Ok(None) => return fail(format!("連不到相機 {addr} — 找不到位址")),
+        Err(e) => return fail(format!("連不到相機 {addr} — {e}")),
+    };
+    let timeout = config.timeout();
+    let mut stream = match TcpStream::connect_timeout(&sockaddr, timeout) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
+            return fail(format!("相機 {addr} 逾時（{} 秒）", config.timeout));
+        }
+        Err(e) => return fail(format!("連不到相機 {addr} — {e}")),
+    };
+    let _ = stream.set_write_timeout(Some(timeout));
+    if let Err(e) = stream.write_all(unescape(&config.trigger).as_bytes()) {
+        return fail(format!("送不出觸發字串到 {addr} — {e}"));
+    }
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(1500)));
+    let mut buf = vec![0u8; 8192];
+    match stream.read(&mut buf) {
+        Ok(n) if n > 0 => Ok(Some(String::from_utf8_lossy(&buf[..n]).trim().to_string())),
+        _ => Ok(None),
+    }
+}
+
 /// Settings forms hold `SNAP\r\n` typed literally; send what was meant.
 fn unescape(text: &str) -> String {
     text.replace("\\r", "\r").replace("\\n", "\n").replace("\\t", "\t")
@@ -453,6 +487,29 @@ mod tests {
         };
         let frame = capture(&c).unwrap();
         assert_eq!(frame.data, b"\xff\xd8hello\xff\xd9");
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn trigger_is_sent_and_the_reply_kept() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut sock, _) = listener.accept().unwrap();
+            let mut got = [0u8; 4];
+            sock.read_exact(&mut got).unwrap();
+            assert_eq!(&got, b"T1\r\n");
+            sock.write_all(b"OK;T7320BC").unwrap();
+        });
+        let c = CameraConfig {
+            transport: "folder".into(),
+            host: "127.0.0.1".into(),
+            port,
+            trigger: "T1\\r\\n".into(),
+            timeout: 3.0,
+            ..Default::default()
+        };
+        assert_eq!(send_trigger(&c).unwrap().as_deref(), Some("OK;T7320BC"));
         server.join().unwrap();
     }
 

@@ -66,6 +66,8 @@ pub struct IssuePage {
     qty: i64,
     capture: Option<Proposal>,
     task: Task<CaptureResult>,
+    trigger: Task<Result<Option<String>, String>>,
+    camera_reply: Option<String>,
     /// When the operator declared "the next photo is this box".
     wait_since: Option<std::time::SystemTime>,
     last_seen: Option<SourceInfo>,
@@ -81,6 +83,18 @@ pub struct IssuePage {
 impl IssuePage {
     fn folder_source(&self) -> bool {
         self.camera.enabled && self.camera.transport == "folder" && self.camera.configured()
+    }
+
+    /// Folder source with a TCP command port: the trigger goes over TCP, the
+    /// photo lands in the folder.
+    fn folder_trigger(&self) -> bool {
+        self.folder_source() && !self.camera.host.is_empty() && !self.camera.trigger.is_empty()
+    }
+
+    fn fire_trigger(&mut self, ctx: &egui::Context) {
+        self.start_waiting();
+        let config = self.camera.clone();
+        self.trigger = Task::spawn(ctx, move || camera::send_trigger(&config).map_err(|e| e.to_string()));
     }
 
     fn network_source(&self) -> bool {
@@ -170,6 +184,7 @@ impl IssuePage {
         self.steps.clear();
         self.show_extra = false;
         self.error = None;
+        self.camera_reply = None;
         self.stage = Stage::Shoot;
     }
 
@@ -221,6 +236,13 @@ impl IssuePage {
                     shared.error(format!("{e}　已切到手動登錄"));
                     self.stage = Stage::Manual;
                 }
+            }
+        }
+
+        if let Some(result) = self.trigger.poll() {
+            match result {
+                Ok(reply) => self.camera_reply = reply,
+                Err(e) => shared.error(format!("觸發相機失敗：{e}")),
             }
         }
 
@@ -338,7 +360,14 @@ impl IssuePage {
                     ui.vertical_centered(|ui| {
                         ui.add(egui::Spinner::new().size(40.0));
                         ui.add_space(8.0);
-                        ui.label(RichText::new("去拍這一箱").font(bold_font(28.0)));
+                        ui.label(
+                            RichText::new(if self.folder_trigger() {
+                                "拍好了就等照片進來"
+                            } else {
+                                "去拍這一箱"
+                            })
+                            .font(bold_font(28.0)),
+                        );
                         ui.label(
                             RichText::new("拍完存進資料夾就會自動開始辨識，不用回來按任何東西。")
                                 .font(font(16.0))
@@ -347,6 +376,16 @@ impl IssuePage {
                     });
                 });
             ui.add_space(12.0);
+            if self.folder_trigger() {
+                let label = if self.trigger.running() { "觸發中…" } else { "📷 拍這一箱" };
+                if touch(ui, label, PRIMARY, Color32::WHITE, 96.0, 26.0, !self.trigger.running()).clicked() {
+                    self.fire_trigger(ui.ctx());
+                }
+                if let Some(reply) = &self.camera_reply {
+                    ui.label(small(format!("相機回覆：{reply}")));
+                }
+                ui.add_space(8.0);
+            }
             let seen = match &self.last_seen {
                 Some(info) => format!(
                     "資料夾最新的是 {} 那張（{}），在等更新的。",

@@ -166,16 +166,17 @@ impl SettingsPage {
         for (value, label, note) in RECOGNITION_MODELS {
             let selected = self.model == *value;
             ui.horizontal(|ui| {
-                if ui.radio(selected, *label).clicked() && !selected
+                if ui.radio(selected, *label).clicked()
+                    && !selected
                     && shared
                         .act(
                             service::save_recognition_model(&shared.store, user, value),
                             Some("已更改辨識模型，下一張照片就會用新的"),
                         )
                         .is_some()
-                    {
-                        self.model = value.to_string();
-                    }
+                {
+                    self.model = value.to_string();
+                }
                 ui.label(small(*note));
             });
         }
@@ -220,6 +221,7 @@ impl SettingsPage {
         let Some(form) = &mut self.camera else { return };
         let mut save = false;
         let mut test = false;
+        let mut trigger_test = false;
         egui::Grid::new("camera").num_columns(2).spacing([16.0, 12.0]).show(ui, |ui| {
             ui.label("啟用");
             toggle(ui, &mut form.config.enabled);
@@ -253,6 +255,18 @@ impl SettingsPage {
                         }
                     });
                     ui.label(small("相機軟體存圖的地方。網路分享資料夾可以用 \\\\電腦名稱\\分享名稱"));
+                });
+                ui.end_row();
+                ui.label("TCP 觸發（選填）");
+                ui.vertical(|ui| {
+                    ui.horizontal(|ui| {
+                        text_input(ui, &mut form.config.host, "相機 IP，例 169.254.187.1", 220.0);
+                        ui.label("埠");
+                        number_input(ui, &mut form.port, "8192", 80.0);
+                        ui.label("字串");
+                        text_input(ui, &mut form.config.trigger, r"例 T1\r\n", 120.0);
+                    });
+                    ui.label(small("填了的話，領用畫面的「拍這一箱」會先送這個字串叫相機拍照，再等資料夾出現新照片。字串要跟相機軟體（SCMVS）通訊觸發的設定一致。"));
                 });
                 ui.end_row();
             } else {
@@ -304,6 +318,14 @@ impl SettingsPage {
             {
                 test = true;
             }
+            if form.config.transport == "folder"
+                && !form.config.host.is_empty()
+                && ui
+                    .add_enabled(!self.test.running(), egui::Button::new("測試觸發").min_size(Vec2::new(110.0, 40.0)))
+                    .clicked()
+            {
+                trigger_test = true;
+            }
             if self.test.running() {
                 ui.spinner();
                 ui.label(muted("連線中…"));
@@ -320,6 +342,28 @@ impl SettingsPage {
                     {
                         self.result = None;
                     }
+                }
+                Err(e) => shared.error(e),
+            }
+        }
+        if trigger_test {
+            match form.to_config() {
+                Ok(config) => {
+                    self.result = None;
+                    self.preview = None;
+                    self.test = Task::spawn(ui.ctx(), move || match camera::send_trigger(&config) {
+                        Ok(reply) => TestResult {
+                            ok: true,
+                            text: format!(
+                                "已送出觸發到 {}:{}。相機回覆：{}",
+                                config.host,
+                                config.port,
+                                reply.unwrap_or_else(|| "（沒有回覆）".into())
+                            ),
+                            image: None,
+                        },
+                        Err(e) => TestResult { ok: false, text: e.to_string(), image: None },
+                    });
                 }
                 Err(e) => shared.error(e),
             }

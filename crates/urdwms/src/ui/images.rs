@@ -111,5 +111,4 @@ impl ImageCache {
         let tex = ctx.load_texture(path.to_string_lossy(), image, TextureOptions::LINEAR);
         self.slots.insert(path.to_path_buf(), Slot::Ready(tex));
     }
-
 }
