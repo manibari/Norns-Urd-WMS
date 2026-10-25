@@ -199,14 +199,33 @@ pub fn touch(
     size: f32,
     enabled: bool,
 ) -> Response {
-    let stroke =
-        if fill == Color32::WHITE { Stroke::new(1.5, Color32::from_rgb(0xd9, 0xd9, 0xd9)) } else { Stroke::NONE };
-    let button = egui::Button::new((egui::Atom::grow(), styled(text, size, fg), egui::Atom::grow()))
-        .fill(fill)
-        .stroke(stroke)
-        .corner_radius(CornerRadius::same(10))
-        .min_size(Vec2::new(ui.available_width(), height));
-    ui.add_enabled(enabled, button)
+    // Drawn by hand so the label sits dead centre on a full-width button —
+    // read from a step away, an off-centre label looks like a different control.
+    let sense = if enabled { Sense::click() } else { Sense::hover() };
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(ui.available_width(), height), sense);
+    let hovered = enabled && response.hovered();
+    let pressed = enabled && response.is_pointer_button_down_on();
+    let mut bg = fill;
+    if !enabled {
+        bg = tint(fill, 0.45);
+    } else if pressed {
+        bg = darken(fill);
+    } else if hovered && fill != Color32::WHITE {
+        bg = Color32::from_rgb(
+            (fill.r() as f32 * 0.92) as u8,
+            (fill.g() as f32 * 0.92) as u8,
+            (fill.b() as f32 * 0.92) as u8,
+        );
+    }
+    let painter = ui.painter();
+    painter.rect_filled(rect, CornerRadius::same(10), bg);
+    if fill == Color32::WHITE {
+        let edge = if hovered { PRIMARY } else { Color32::from_rgb(0xd9, 0xd9, 0xd9) };
+        painter.rect_stroke(rect, CornerRadius::same(10), Stroke::new(1.5, edge), egui::StrokeKind::Inside);
+    }
+    let fg = if enabled { fg } else { tint(fg, 0.6) };
+    painter.text(rect.center(), egui::Align2::CENTER_CENTER, text.into(), font(size), fg);
+    if enabled { response.on_hover_cursor(egui::CursorIcon::PointingHand) } else { response }
 }
 
 /// Big number with a caption, read from a few steps away.

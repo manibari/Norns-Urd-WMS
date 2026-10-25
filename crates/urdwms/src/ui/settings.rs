@@ -224,7 +224,14 @@ impl SettingsPage {
         let mut trigger_test = false;
         egui::Grid::new("camera").num_columns(2).spacing([16.0, 12.0]).show(ui, |ui| {
             ui.label("啟用");
-            toggle(ui, &mut form.config.enabled);
+            ui.horizontal(|ui| {
+                toggle(ui, &mut form.config.enabled);
+                if form.config.enabled {
+                    tag(ui, "領用畫面會用這個來源", super::theme::OK);
+                } else {
+                    tag(ui, "關閉中 —— 領用畫面不會用相機", super::theme::ORANGE);
+                }
+            });
             ui.end_row();
             ui.label("連線方式");
             ui.vertical(|ui| {
@@ -335,15 +342,32 @@ impl SettingsPage {
                 service::camera_config(&shared.store.conn).map(|c| c.endpoint()).unwrap_or_default()
             )));
         });
-        if save {
+        // Testing saves first: a test that passes on unsaved values reads as
+        // "done", and the issuing screen then never sees the camera.
+        if save || test || trigger_test {
             match form.to_config() {
                 Ok(config) => {
+                    let enabled = config.enabled;
                     if shared.act(service::save_camera(&shared.store, user, config), Some("已儲存影像來源")).is_some()
                     {
                         self.result = None;
+                        form.has_password |= !form.password.is_empty();
+                        form.password.clear();
+                        if !enabled {
+                            shared.warn(
+                                "已儲存，但「啟用」是關的 —— 領用畫面不會用這個相機。要用請把「啟用」打開再儲存。",
+                            );
+                        }
+                    } else {
+                        test = false;
+                        trigger_test = false;
                     }
                 }
-                Err(e) => shared.error(e),
+                Err(e) => {
+                    shared.error(e);
+                    test = false;
+                    trigger_test = false;
+                }
             }
         }
         if trigger_test {

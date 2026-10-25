@@ -325,6 +325,23 @@ impl IssuePage {
                 ui.add_space(6.0);
                 self.file_button(ui, shared, "🖼 改用照片檔", TOUCH, 18.0);
             } else {
+                if self.camera.configured() && !self.camera.enabled {
+                    alert_with(
+                        ui,
+                        Kind::Warning,
+                        "影像來源已設定，但沒有啟用",
+                        &format!(
+                            "目前設定的是 {}。到系統設定把「啟用」打開，這裡就會自動等相機的照片。",
+                            self.camera.endpoint()
+                        ),
+                        |ui| {
+                            if link(ui, "去系統設定 →").clicked() {
+                                shared.nav = Some(Nav::Go(Page::Settings));
+                            }
+                        },
+                    );
+                    ui.add_space(10.0);
+                }
                 // No fixed camera configured: a photo file is the capture path
                 // (the tablet's own camera app saves to a folder, which can
                 // also be set as a folder source in 系統設定).
@@ -333,9 +350,11 @@ impl IssuePage {
                 {
                     self.run_capture(ui.ctx(), shared, Source::File(path));
                 }
-                ui.label(small(
-                    "尚未設定固定相機。可到「系統設定 → 影像設定」接一台網路相機，或指定相機存檔的資料夾。",
-                ));
+                if !self.camera.configured() {
+                    ui.label(small(
+                        "尚未設定固定相機。可到「系統設定 → 影像設定」接一台網路相機，或指定相機存檔的資料夾。",
+                    ));
+                }
             }
             ui.add_space(16.0);
             ui.vertical_centered(|ui| {
@@ -385,6 +404,20 @@ impl IssuePage {
                     ui.label(small(format!("相機回覆：{reply}")));
                 }
                 ui.add_space(8.0);
+            }
+            if let Some(info) = self.last_seen.clone().filter(|i| i.age_seconds <= camera::STALE_AFTER)
+                && touch(
+                    ui,
+                    format!("用資料夾最新那張（{}，{:.0} 秒前）", info.name, info.age_seconds),
+                    Color32::WHITE,
+                    super::theme::TEXT,
+                    TOUCH,
+                    18.0,
+                    true,
+                )
+                .clicked()
+            {
+                self.run_capture(ui.ctx(), shared, Source::Camera);
             }
             let seen = match &self.last_seen {
                 Some(info) => format!(
