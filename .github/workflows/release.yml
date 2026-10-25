@@ -1,0 +1,55 @@
+# Push a tag like v0.2.0 and this builds the Windows exe, packs it with the
+# licences and a short guide, and publishes a GitHub Release.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to (re)build, e.g. v0.2.0"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace
+      - run: cargo build --release -p urdwms
+      - name: Package
+        shell: pwsh
+        run: |
+          $tag = "${{ github.event.inputs.tag || github.ref_name }}"
+          $dir = "Urd-WMS-$tag-windows-x64"
+          New-Item -ItemType Directory $dir | Out-Null
+          Copy-Item target/release/urdwms.exe "$dir/Urd-WMS.exe"
+          Copy-Item packaging/README.txt "$dir/README.txt"
+          Copy-Item crates/urdwms/assets/fonts/OFL.txt "$dir/LICENSE-font-NotoSansTC-OFL.txt"
+          Compress-Archive -Path $dir -DestinationPath "$dir.zip"
+          (Get-FileHash "$dir.zip" -Algorithm SHA256).Hash.ToLower() + "  $dir.zip" | Out-File -Encoding ascii "$dir.zip.sha256"
+          "ZIP=$dir.zip" >> $env:GITHUB_ENV
+          "TAG=$tag" >> $env:GITHUB_ENV
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $notes = "Windows 10/11 x64 單一執行檔。解壓後執行 Urd-WMS.exe，第一次啟動會建立資料庫（%LOCALAPPDATA%\UrdWMS）。詳見壓縮檔內 README.txt。"
+          gh release view $env:TAG 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $env:TAG $env:ZIP "$env:ZIP.sha256" --clobber
+          } else {
+            gh release create $env:TAG $env:ZIP "$env:ZIP.sha256" --title "Urd-WMS $env:TAG" --notes $notes
+          }

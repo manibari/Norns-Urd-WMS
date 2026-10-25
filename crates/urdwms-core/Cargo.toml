@@ -1,0 +1,13 @@
+[package]
+name = "urdwms-core"
+description = "Pure rules for Urd-WMS: date normalisation, lot matching, FIFO, unit conversion, camera capture, recognition"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+ureq = { version = "3", default-features = false, features = ["rustls", "json"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
