@@ -1,0 +1,20 @@
+[workspace]
+resolver = "3"
+members = ["crates/urdwms-core", "crates/urdwms"]
+
+[workspace.package]
+version = "0.2.0"
+edition = "2024"
+rust-version = "1.88"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
+panic = "unwind"
+
+# PBKDF2 and image decoding are unbearably slow unoptimised; dependencies are
+# built optimised even in debug so tests and dev runs stay quick.
+[profile.dev.package."*"]
+opt-level = 2

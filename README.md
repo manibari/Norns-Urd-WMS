@@ -168,38 +168,38 @@ API 用 `fifo_basis` 說明目前依據哪一欄，畫面照實講「暫時改�
 
 ## 跑起來
 
+**正式版是單一 Windows 執行檔**（Rust 重寫，2026-10）：到 GitHub Releases 下載
+`Urd-WMS-vX.Y.Z-windows-x64.zip`，解壓後執行 `Urd-WMS.exe`。安裝與首次設定見
+[`packaging/README.txt`](packaging/README.txt)。
+
+| | |
+|---|---|
+| 介面 | [egui / eframe](https://github.com/emilk/egui)（MIT / Apache-2.0），OpenGL 繪製，平板觸控 |
+| 資料 | SQLite（rusqlite，內建），**與舊版 Python 後端同一份 schema**，舊的 `urdwms.db` 直接可開 |
+| 辨識 | Gemini REST API（ureq + rustls），金鑰在「系統設定」輸入或用 `GEMINI_API_KEY` |
+| 影像來源 | 照片檔、HTTP snapshot、原始 TCP、相機存檔資料夾（Hikrobot 等工業相機或平板相機 App） |
+| 字型 | Noto Sans TC 內嵌（SIL OFL），不依賴系統字型 |
+
+開發：
+
 ```bash
-echo 'GEMINI_API_KEY=...' > .env          # 辨識用；沒有的話流程仍可跑，會退人工挑批次
-
-# 後端 :8071
-python3 backend/seed.py
-set -a && . ./.env && set +a
-python3 -m uvicorn app.main:app --app-dir backend --port 8071 --reload
-
-# 前端 :3071
-cd frontend && pnpm install && pnpm dev
+cargo test --workspace                       # 核心規則 + 服務層測試
+cargo run -p urdwms -- --demo --data-dir /tmp/urdwms-demo
+cargo run -p urdwms -- --data-dir /tmp/urdwms-demo --screenshot /tmp/shots --as peter   # 每個畫面截圖
 ```
 
-開 http://localhost:3071 ，先登入。首頁是**庫存總覽**：各品項在庫、批次數，以及最重要的
-「下一個該領哪批」—— 知道有 9 箱沒有用，還得知道下一箱是哪一箱。
+| 目錄 | 內容 |
+|---|---|
+| `crates/urdwms-core/` | 純規則：日期/料號正規化、OCR 混淆距離、候選集比對、FIFO、單位換算、相機擷取、辨識 provider |
+| `crates/urdwms/` | 桌面程式：SQLite 儲存、服務層（權限、交易、稽核軌跡）、畫面 |
+| `.github/workflows/` | CI（Linux fmt/clippy/test + Windows build/test）、Release（推 `v*` tag 自動發佈） |
 
-seed 帳號：
+發版：`git tag v0.2.0 && git push origin v0.2.0`，Actions 會建置 Windows 版並建立 GitHub Release。
 
-| 帳號 | 顯示名 | 職位 | 權限層級 | 密碼 |
-|---|---|---|---|---|
-| `peter` | Peter | 資訊 | admin | `peter0821` |
-| `kuo` | 郭 | 倉管 | manager | `urdwms2026` |
-| `huang` | 黃揚文 | 廠長 | manager | `urdwms2026` |
-| `operator` | 線上作業員 | 包裝線作業員 | user | `urdwms2026` |
+### 舊版（Python + Next.js，保留作為參考）
 
-畫面依流程排：
-**1. 基本資料 → 2. 收貨建批 → 3. 領用登錄 → 4. 紀錄與追溯**，外加「提醒」。
-
-基本資料排第一是因為它在流程第一，不是因為它是「設定」——沒有型號就沒東西可收，
-沒有機台和產品就沒辦法記領用。
-
-沒有前置資料時 UI 會往上游導 —— 選到沒在庫批次的料號，領用畫面不會給你一個按了沒用的表單，
-而是說明「FIFO 要排序就得知道還有哪幾批在庫」並給收貨入口。
+`backend/`、`frontend/`、`core/`（Python）、`poc/` 是重寫前的垂直切片與辨識 PoC 工具。
+PoC 的量測腳本（`poc/run_poc.py`）仍以 Python 執行；桌面程式不需要它們。
 
 ## 狀態
 
@@ -217,6 +217,6 @@ seed 帳號：
 辨識 PoC 初步結果（n=2 有章樣本，`gemini-pro-latest`）：命中 100%、誤命中 0%、
 兩張陷阱樣本正確回 null。**撐不起結論**，真 PoC 仍需現場實拍 100–200 張分層樣本。
 
-技術棧：FastAPI + SQLite（:8071）· Next.js 15 + antd v6（:3071）· 設計沿用
+技術棧（舊版）：FastAPI + SQLite（:8071）· Next.js 15 + antd v6（:3071）· 設計沿用
 [ChimesFlow design system](../ChimesFlow/docs/design-system.md)，領用畫面宣告 mode-b 局部 override
 （touch target 64px、大字、整片色塊回饋 —— 戴手套、包裝線、可能逆光）。
