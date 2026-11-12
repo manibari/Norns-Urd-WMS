@@ -24,6 +24,7 @@ Urd-WMS 包材批次管理
   --demo                空資料庫時載入示範資料（品項、批次、四個示範帳號）
   --screenshot <資料夾> 依序擷取每個畫面存成 PNG 後結束（搭配 --as <帳號>）
   --as <帳號>           以此帳號直接登入（只限 --screenshot）
+  --reset-admin [帳號]  忘記管理者密碼時使用：改成一組臨時密碼，登入後要改掉
   --version             顯示版本
 ";
 
@@ -32,6 +33,7 @@ struct Args {
     demo: bool,
     screenshot: Option<PathBuf>,
     as_user: Option<String>,
+    reset_admin: Option<Option<String>>,
 }
 
 fn default_data_dir() -> PathBuf {
@@ -48,14 +50,24 @@ fn default_data_dir() -> PathBuf {
 }
 
 fn parse_args() -> Result<Args, String> {
-    let mut args = Args { data_dir: default_data_dir(), demo: false, screenshot: None, as_user: None };
-    let mut it = std::env::args().skip(1);
+    parse_args_from(std::env::args().skip(1))
+}
+
+fn optional_username(it: &mut std::iter::Peekable<impl Iterator<Item = String>>) -> Option<String> {
+    if it.peek().is_some_and(|next| !next.starts_with("--")) { it.next() } else { None }
+}
+
+fn parse_args_from(input: impl IntoIterator<Item = String>) -> Result<Args, String> {
+    let mut args =
+        Args { data_dir: default_data_dir(), demo: false, screenshot: None, as_user: None, reset_admin: None };
+    let mut it = input.into_iter().peekable();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--data-dir" => args.data_dir = it.next().ok_or("--data-dir 需要路徑")?.into(),
             "--demo" => args.demo = true,
             "--screenshot" => args.screenshot = Some(it.next().ok_or("--screenshot 需要資料夾")?.into()),
             "--as" => args.as_user = Some(it.next().ok_or("--as 需要帳號")?),
+            "--reset-admin" => args.reset_admin = Some(optional_username(&mut it)),
             "--version" => {
                 println!("urdwms {}", env!("CARGO_PKG_VERSION"));
                 std::process::exit(0);
@@ -67,7 +79,19 @@ fn parse_args() -> Result<Args, String> {
             other => return Err(format!("不認得的參數：{other}\n\n{HELP}")),
         }
     }
+    if args.reset_admin.is_some() && (args.demo || args.screenshot.is_some() || args.as_user.is_some()) {
+        return Err("--reset-admin 不能和 --demo、--screenshot、--as 一起用".into());
+    }
     Ok(args)
+}
+
+fn check_reset_database(data_dir: &std::path::Path) -> Result<(), String> {
+    let path = data_dir.join("urdwms.db");
+    if path.exists() {
+        Ok(())
+    } else {
+        Err(format!("找不到資料庫：{}。資料若放在別的位置，請加 --data-dir <路徑>。", path.display()))
+    }
 }
 
 /// A crash on the floor should leave something behind to read.
@@ -125,6 +149,24 @@ fn window_icon() -> egui::IconData {
 
 fn main() {
     let args = parse_args().unwrap_or_else(|e| fail(&e));
+    if let Some(username) = &args.reset_admin {
+        check_reset_database(&args.data_dir).unwrap_or_else(|e| fail(&e));
+        applog::init(&args.data_dir);
+        let store = service::Store::open(&args.data_dir).unwrap_or_else(|e| fail(&format!("無法開啟資料庫：{e}")));
+        let reset = service::reset_admin_password(&store, username.as_deref()).unwrap_or_else(|e| fail(&e.0));
+        let message = format!(
+            "已重設「{}」（帳號 {}）的密碼。\n\n臨時密碼：{}\n\n請用這組密碼登入，系統會要求立刻改成只有你知道的密碼。",
+            reset.name, reset.username, reset.password
+        );
+        println!("{message}");
+        #[cfg(windows)]
+        rfd::MessageDialog::new()
+            .set_title("Urd-WMS")
+            .set_description(&message)
+            .set_level(rfd::MessageLevel::Info)
+            .show();
+        return;
+    }
     if let Err(e) = std::fs::create_dir_all(&args.data_dir) {
         fail(&format!("無法建立資料夾 {}：{e}", args.data_dir.display()));
     }
@@ -175,5 +217,46 @@ fn main() {
     if let Err(e) = result {
         applog::error(format!("無法啟動畫面：{e}"));
         fail(&format!("無法啟動畫面（顯示卡驅動不支援 OpenGL 2.0？）：{e}"));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reset_admin_argument_order_and_conflict() {
+        for (input, username, data_dir) in [
+            (vec!["--reset-admin"], None, None),
+            (vec!["--reset-admin", "peter"], Some("peter"), None),
+            (vec!["--reset-admin", "--data-dir", "X"], None, Some("X")),
+            (vec!["--data-dir", "X", "--reset-admin", "peter"], Some("peter"), Some("X")),
+        ] {
+            let args = parse_args_from(input.into_iter().map(str::to_string)).unwrap();
+            assert_eq!(args.reset_admin.as_ref().and_then(Option::as_deref), username);
+            assert!(args.reset_admin.is_some());
+            if let Some(dir) = data_dir {
+                assert_eq!(args.data_dir, PathBuf::from(dir));
+            }
+        }
+        assert_eq!(
+            parse_args_from(["--reset-admin", "--demo"].into_iter().map(str::to_string)).err().unwrap(),
+            "--reset-admin 不能和 --demo、--screenshot、--as 一起用"
+        );
+    }
+
+    #[test]
+    fn missing_reset_database_does_not_create_directory() {
+        let dir = std::env::temp_dir().join(format!("urdwms-reset-missing-{}", std::process::id()));
+        let nested = dir.join("absent");
+        let error = check_reset_database(&nested).unwrap_err();
+        assert_eq!(
+            error,
+            format!(
+                "找不到資料庫：{}。資料若放在別的位置，請加 --data-dir <路徑>。",
+                nested.join("urdwms.db").display()
+            )
+        );
+        assert!(!nested.exists());
     }
 }

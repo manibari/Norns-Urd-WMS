@@ -321,6 +321,7 @@ pub fn action_label(action: &str) -> &str {
         "auth.login" => "登入",
         "auth.logout" => "登出",
         "auth.password_change" => "更改密碼",
+        "auth.password_reset_cli" => "指令重設管理者密碼",
         "lot.create" => "收貨建批",
         "lot.update" => "批次修正",
         "lot.delete" => "批次刪除",
